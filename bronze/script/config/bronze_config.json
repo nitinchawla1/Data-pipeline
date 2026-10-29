@@ -259,10 +259,36 @@
     }
   }
 }
+
+
+file_obj = s3_client.get_object(Bucket=bronze_bucket, Key=latest_key)
+            import pandas as pd
+            df = pd.read_parquet(io.BytesIO(file_obj["Body"].read()))
+            if "id" in df.columns:
+                ids = df["id"].dropna().astype(str).unique().tolist()
+                return [i.strip() for i in ids if i.strip()]
+        except Exception as e:
+            logger.warning(f"Could not read segments from S3 (s3://{bronze_bucket}/{s3_prefix}): {e}")
+        return []
+    @classmethod
+    def _get_dynamic_segment_ids(
+        cls,
+        base_url: str,
+        bearer_token: str,
+        source_config: Dict[str, Any]
+    ) -> List[str]:
+        """
+        Retrieves active Peakon segment IDs via 3-tier discovery:
+        1. In-memory cache (if 'segments' table was processed earlier in the same run).
+        2. Ingested Bronze S3 'segments' Parquet table.
+        3. Peakon REST API /api/v1/segments fallback.
+        """
+        # Tier 1: In-memory cache
         if cls._cached_segment_ids:
             logger.info(f"Using {len(cls._cached_segment_ids)} segment IDs from in-memory cache.")
             return cls._cached_segment_ids
         # Tier 2: Read from ingested Bronze segments in S3
+
         bronze_bucket = source_config.get("bronze_bucket")
         bronze_data_prefix = source_config.get("bronze_data_prefix", "bronze/data").strip("/")
         if bronze_bucket:
