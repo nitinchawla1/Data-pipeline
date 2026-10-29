@@ -1,4 +1,4 @@
-{
+  {
   "_comment": "Bronze Layer Ingestion Configuration — UAX Data Lake Pipeline. All mandatory Secrets Manager keys are documented per source block.",
   "pipeline_defaults": {
     "bronze_bucket": "",
@@ -259,3 +259,37 @@
     }
   }
 }
+        if cls._cached_segment_ids:
+            logger.info(f"Using {len(cls._cached_segment_ids)} segment IDs from in-memory cache.")
+            return cls._cached_segment_ids
+        # Tier 2: Read from ingested Bronze segments in S3
+        bronze_bucket = source_config.get("bronze_bucket")
+        bronze_data_prefix = source_config.get("bronze_data_prefix", "bronze/data").strip("/")
+        if bronze_bucket:
+            s3_prefix = f"{bronze_data_prefix}/peakon/segments/"
+            s3_ids = cls._read_segment_ids_from_s3(bronze_bucket, s3_prefix)
+            if s3_ids:
+                cls._cached_segment_ids = s3_ids
+                logger.info(f"Loaded {len(s3_ids)} segment IDs from S3 ({s3_prefix}).")
+                return s3_ids
+        # Tier 3: Fetch directly from Peakon API /api/v1/segments
+        logger.info(f"Fetching segment IDs directly from Peakon API: {base_url}/api/v1/segments...")
+        api_url = f"{base_url.rstrip('/')}/api/v1/segments?per_page=2000"
+        try:
+            resp = cls._execute_request_with_retry(api_url, bearer_token)
+            raw_items = resp.get("data", [])
+            if isinstance(raw_items, dict):
+                raw_items = [raw_items]
+            segment_ids = [
+                str(item["id"]).strip()
+                for item in raw_items
+                if isinstance(item, dict) and item.get("id")
+            ]
+            if segment_ids:
+                cls._cached_segment_ids = segment_ids
+                logger.info(f"Acquired {len(segment_ids)} segment IDs from Peakon API.")
+                return segment_ids
+        except Exception as api_err:
+            logger.error(f"Failed to fetch segment IDs from Peakon API: {api_err}")
+            raise RuntimeError(f"Unable to resolve dynamic segment IDs: {api_err}") from api_err
+        return []
