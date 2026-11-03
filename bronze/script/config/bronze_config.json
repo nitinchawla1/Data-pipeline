@@ -1,4 +1,4 @@
-  {
+{
   "_comment": "Bronze Layer Ingestion Configuration — UAX Data Lake Pipeline. All mandatory Secrets Manager keys are documented per source block.",
   "pipeline_defaults": {
     "bronze_bucket": "",
@@ -42,7 +42,13 @@
   },
   "source_systems": {
     "servicenow": {
-      "_secrets_required": ["auth_type", "api_base_url", "username", "password", "batch_size"],
+      "_secrets_required": [
+        "auth_type",
+        "api_base_url",
+        "username",
+        "password",
+        "batch_size"
+      ],
       "_note": "auth_type must be 'basic' or 'oauth'. For oauth also add: token_url, client_id, client_secret.",
       "base_url": "https://your-instance.service-now.com",
       "api_endpoint_template": "/api/now/table/{table_name}",
@@ -85,7 +91,15 @@
       }
     },
     "genesys": {
-      "_secrets_required": ["auth_type", "token_url", "client_id", "client_secret", "grant_type", "api_base_url", "batch_size"],
+      "_secrets_required": [
+        "auth_type",
+        "token_url",
+        "client_id",
+        "client_secret",
+        "grant_type",
+        "api_base_url",
+        "batch_size"
+      ],
       "_note": "auth_type must be 'oauth'. grant_type must be 'client_credentials'.",
       "base_url": "https://api.mypurecloud.com",
       "api_endpoint_template": "/api/v2/{table_name}",
@@ -108,7 +122,15 @@
       }
     },
     "moveworks": {
-      "_secrets_required": ["auth_type", "token_url", "client_id", "client_secret", "grant_type", "api_base_url", "batch_size"],
+      "_secrets_required": [
+        "auth_type",
+        "token_url",
+        "client_id",
+        "client_secret",
+        "grant_type",
+        "api_base_url",
+        "batch_size"
+      ],
       "_note": "auth_type must be 'oauth2'. grant_type must be 'client_credentials'. batch_size max is 500.",
       "base_url": "https://api.moveworks.ai",
       "assistant_name": "acmecorp-conversations-rest-api",
@@ -158,7 +180,14 @@
       }
     },
     "postgresql": {
-      "_secrets_required": ["db_type", "host", "dbname", "username", "password", "port"],
+      "_secrets_required": [
+        "db_type",
+        "host",
+        "dbname",
+        "username",
+        "password",
+        "port"
+      ],
       "_note_port": "'port' MUST be in Secrets Manager (not here). The value here (5432) is documentation only — the connector reads it exclusively from Secrets Manager.",
       "connection_type": "database",
       "db_type": "postgresql",
@@ -183,7 +212,14 @@
       }
     },
     "mysql": {
-      "_secrets_required": ["db_type", "host", "dbname", "username", "password", "port"],
+      "_secrets_required": [
+        "db_type",
+        "host",
+        "dbname",
+        "username",
+        "password",
+        "port"
+      ],
       "_note_port": "'port' MUST be in Secrets Manager. Standard MySQL/MariaDB port is 3306.",
       "connection_type": "database",
       "db_type": "mysql",
@@ -256,109 +292,134 @@
           "fetch_mode": "latest"
         }
       }
+    },
+    "workday": {
+      "_note": "Workday CSV file feed. 'type' must match a key in connectors CONNECTOR_MAP (use 's3_file').",
+      "type": "s3_file",
+      "source_bucket": "uax-datalake-{env}-bucket",
+      "file_prefix": "landing/workday/",
+      "file_format": "csv",
+      "delimiter": ",",
+      "has_header": true,
+      "encoding": "utf-8",
+      "multiLine": true,
+      "escape": "\\",
+      "_note_fetch_mode": "'all' = all files modified after watermark (incremental). 'latest' = only the most recently modified file (snapshot/full-refresh).",
+      "tables": {
+        "Trended_Workforce_for_Data_Lake_Pulls": {
+          "initial_load_date": "2024-01-01 00:00:00",
+          "upper_bound": "",
+          "file_path": "landing/workday/Trended_Workforce_for_Data_Lake_Pulls_*.csv",
+          "fetch_mode": "latest"
+        },
+        "Trended_Workforce_BP_Reason_for_Data_Lake_Pulls": {
+          "initial_load_date": "2024-01-01 00:00:00",
+          "upper_bound": "",
+          "file_path": "landing/workday/Trended_Workforce_BP_Reason_for_Data_Lake_Pulls_*.csv",
+          "fetch_mode": "latest"
+        },
+        "Cost_Center_Manager_and_Levels_Lookup_for_Data_Lake": {
+          "initial_load_date": "2024-01-01 00:00:00",
+          "upper_bound": "",
+          "file_path": "landing/workday/Cost_Center_Manager_and_Levels_Lookup_for_Data_Lake_*.csv",
+          "fetch_mode": "latest"
+        },
+        "Positions_Awaiting_Approval_for_Data_Lake": {
+          "initial_load_date": "2024-01-01 00:00:00",
+          "upper_bound": "",
+          "file_path": "landing/workday/Positions_Awaiting_Approval_for_Data_Lake_*.csv",
+          "fetch_mode": "latest"
+        },
+        "Positions_Status_for_Data_Lake": {
+          "initial_load_date": "2024-01-01 00:00:00",
+          "upper_bound": "",
+          "file_path": "landing/workday/Positions_Status_for_Data_Lake_*.csv",
+          "fetch_mode": "latest"
+        }
+      }
+    },
+    "peakon": {
+      "_secrets_required": [
+        "peakon_api_token"
+      ],
+      "_note": "peakon_api_token is the Peakon Custom Application Access Token (or pre-exchanged JWT bearer token). Optional in secret: api_base_url (defaults to https://api.peakon.com).",
+      "secret_name": "uax-datalake/peakon-credentials-{env}",
+      "base_url": "https://api.peakon.com",
+      "api_endpoint_template": "/api/v1/{table_name}",
+      "response_records_key": "data",
+      "batch_size": 2000,
+      "default_query": "interval=quarter&observations=true&participation=true",
+      "tables": {
+        "segments": {
+          "custom_endpoint": "/api/v1/segments?filter[attributeId]=4189",
+          "endpoint": "/api/v1/segments?filter[attributeId]=4189",
+          "initial_load_date": "1900-01-01 00:00:00",
+          "upper_bound": ""
+        },
+        "answers": {
+          "custom_endpoint": "/api/v1/answers/export",
+          "endpoint": "/api/v1/answers/export",
+          "initial_load_date": "1900-01-01 00:00:00",
+          "upper_bound": ""
+        },
+        "employees": {
+          "custom_endpoint": "/api/v1/employees",
+          "endpoint": "/api/v1/employees",
+          "initial_load_date": "1900-01-01 00:00:00",
+          "upper_bound": ""
+        },
+        "engagement_overview": {
+          "custom_endpoint": "/api/v1/engagement/contexts/{context_id}/overview",
+          "endpoint": "/api/v1/engagement/contexts/{context_id}/overview",
+          "initial_load_date": "1900-01-01 00:00:00",
+          "upper_bound": "",
+          "is_segment_level": true
+        },
+        "engagement_drivers": {
+          "custom_endpoint": "/api/v1/engagement/contexts/{context_id}/drivers",
+          "endpoint": "/api/v1/engagement/contexts/{context_id}/drivers",
+          "initial_load_date": "1900-01-01 00:00:00",
+          "upper_bound": "",
+          "is_segment_level": true
+        },
+        "scores_by_category": {
+          "custom_endpoint": "/api/v1/scores/contexts/{context_id}/group/{group}",
+          "endpoint": "/api/v1/scores/contexts/{context_id}/group/{group}",
+          "initial_load_date": "1900-01-01 00:00:00",
+          "upper_bound": "",
+          "is_segment_level": true,
+          "groups": [
+            "engagement",
+            "health_wellbeing",
+            "transformation_change",
+            "diversity_inclusion",
+            "onboarding",
+            "exit",
+            "environmental_social_governance",
+            "values",
+            "other"
+          ]
+        },
+        "scores_by_question": {
+          "custom_endpoint": "/api/v1/scores/contexts/{context_id}/questions/group/{group}",
+          "endpoint": "/api/v1/scores/contexts/{context_id}/questions/group/{group}",
+          "initial_load_date": "1900-01-01 00:00:00",
+          "upper_bound": "",
+          "is_segment_level": true,
+          "groups": [
+            "engagement",
+            "health_wellbeing",
+            "transformation_change",
+            "diversity_inclusion",
+            "onboarding",
+            "exit",
+            "environmental_social_governance",
+            "values",
+            "other"
+          ],
+          "extra_query": "include=question.category"
+        }
+      }
     }
   }
 }
-
-                next_url = f"{base_url}{seg_ep}{sep}per_page={batch_size}"
-                if custom_query and str(custom_query).strip():
-                    cq = str(custom_query).strip()
-                    sep_cq = "&" if "?" in next_url else "?"
-                    next_url = f"{next_url}{sep_cq}{cq}"
-                seg_records_count = 0
-                while next_url:
-                    # Ignore 403 / 404 (confidentiality anonymity threshold or empty segment suppression)
-                    resp_data = cls._execute_request_with_retry(
-                        next_url,
-                        bearer_token,
-                        ignore_status_codes=(403, 404)
-                    )
-                    if not resp_data or not isinstance(resp_data, dict):
-                        # Empty response due to 403 / 404 suppression
-                        break
-                    raw_items = resp_data.get(response_key, [])
-                    if isinstance(raw_items, dict):
-                        raw_items = [raw_items]
-                    elif not isinstance(raw_items, list):
-                        raw_items = []
-                    meta_obj = resp_data.get("meta", {})
-                    page_valid_records = []
-                    for item in raw_items:
-                        if not isinstance(item, dict):
-                            continue
-                        attrs = item.get("attributes")
-                        record: Dict[str, Any] = {
-                            "id": item.get("id"),
-                            "type": item.get("type", table_name),
-                            "segment_id": raw_segment_id,
-                            "context_id": context_id,
-                        }
-                        if isinstance(attrs, dict):
-                            record.update(attrs)
-                        else:
-                            record.update(item)
-                        # Enrich with meta attributes (e.g. meta_interval, meta_participation_rate)
-                        if isinstance(meta_obj, dict):
-                            for mk, mv in meta_obj.items():
-                                if not isinstance(mv, (dict, list)):
-                                    record[f"meta_{mk}"] = mv
-                        # Delta date filtering
-                        rec_ts_str = (
-                            record.get("responseAnsweredAt")
-                            or record.get("updated_at")
-                            or record.get("updatedAt")
-                            or record.get("created_at")
-                            or record.get("createdAt")
-                            or record.get("employmentStart")
-                        )
-                        if not is_full_load and cutoff_dt and rec_ts_str:
-                            rec_dt = _parse_ts(rec_ts_str)
-                            if rec_dt and rec_dt < cutoff_dt:
-                                total_filtered_out += 1
-                                continue
-                        if upper_bound_dt and rec_ts_str:
-                            rec_dt = _parse_ts(rec_ts_str)
-                            if rec_dt and rec_dt > upper_bound_dt:
-                                total_filtered_out += 1
-                                continue
-                        page_valid_records.append(record)
-                    seg_records_count += len(page_valid_records)
-                    total_extracted += len(page_valid_records)
-                    if on_chunk_callback:
-                        records_buffer.extend(page_valid_records)
-                        if len(records_buffer) >= s3_chunk_size:
-                            on_chunk_callback(records_buffer, part_number)
-                            part_number += 1
-                            records_buffer.clear()
-                    else:
-                        all_records.extend(page_valid_records)
-                    # Follow cursor pagination if present
-                    links = resp_data.get("links", {})
-                    next_url = links.get("next") if isinstance(links, dict) else None
-                if seg_idx % 25 == 0 or seg_idx == len(segment_ids):
-                    logger.info(
-                        f"[Peakon/{table_name}] Progress: [{seg_idx}/{len(segment_ids)}] segments processed "
-                        f"({total_extracted} total records accepted so far)."
-                    )
-            if on_chunk_callback and records_buffer:
-                on_chunk_callback(records_buffer, part_number)
-                records_buffer.clear()
-            logger.info(
-                f"[Peakon/{table_name}] Extraction completed across {len(segment_ids)} segments: "
-                f"{total_extracted} records accepted ({total_filtered_out} records skipped)."
-            )
-            return all_records if not on_chunk_callback else []
-        # =========================================================================
-        # Case B: Standard Single-Endpoint Tables (answers, employees, segments, etc.)
-        # =========================================================================
-        clean_endpoint = endpoint.strip()
-        if "?" in clean_endpoint:
-            next_url = f"{base_url}{clean_endpoint}&per_page={batch_size}"
-        else:
-            next_url = f"{base_url}{clean_endpoint}?per_page={batch_size}"
-        if custom_query and str(custom_query).strip():
-            cq = str(custom_query).strip()
-            separator = "&" if "?" in next_url else "?"
-            next_url = f"{next_url}{separator}{cq}"
-        page_num = 1
-        extracted_segment_ids: List[str] = []
