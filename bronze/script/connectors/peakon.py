@@ -24,6 +24,7 @@ Required bronze_config.json keys (source_systems.peakon):
 
 import io
 import json
+import re
 import time
 import logging
 import urllib.request
@@ -31,6 +32,7 @@ import urllib.parse
 from urllib.error import HTTPError, URLError
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
 
@@ -272,8 +274,26 @@ class PeakonConnector:
                     return s3_ids
 
         # Tier 3: Fetch directly from Peakon API /api/v1/segments with cursor pagination
-        logger.info(f"Fetching segment IDs directly from Peakon API: {base_url}/api/v1/segments...")
-        curr_url: Optional[str] = f"{base_url.rstrip('/')}/api/v1/segments?per_page=2000"
+        segments_cfg = ConfigLoader.get_table_config("peakon", "segments", source_config=source_config)
+        segments_endpoint = (
+            segments_cfg.get("custom_endpoint")
+            or segments_cfg.get("endpoint")
+            or "/api/v1/segments"
+        ).strip()
+        if "://" in segments_endpoint:
+            curr_url: Optional[str] = segments_endpoint
+        else:
+            if not segments_endpoint.startswith("/"):
+                segments_endpoint = "/" + segments_endpoint
+            if not segments_endpoint.startswith("/api/v1"):
+                segments_endpoint = f"/api/v1{segments_endpoint}"
+            curr_url = f"{base_url.rstrip('/')}{segments_endpoint}"
+
+        sep = "&" if "?" in curr_url else "?"
+        if "per_page" not in curr_url:
+            curr_url = f"{curr_url}{sep}per_page=2000"
+
+        logger.info(f"Fetching segment IDs directly from Peakon API: {curr_url}...")
         api_segment_ids: List[str] = []
         try:
             while curr_url:
@@ -348,17 +368,22 @@ class PeakonConnector:
 
         bearer_token = cls._get_bearer_token(base_url, api_token)
 
-        # 2. Resolve Table Endpoint, Response Key, and Batch Size
-        endpoint = ConfigLoader.get_table_endpoint("peakon", table_name, config)
+        # 2. Resolve Table Config, Endpoint, Response Key, and Batch Size
+        table_cfg = ConfigLoader.get_table_config("peakon", table_name, source_config=config)
+        endpoint = (
+            table_cfg.get("custom_endpoint")
+            or table_cfg.get("endpoint")
+            or ConfigLoader.get_table_endpoint("peakon", table_name, config)
+        )
         response_key = config.get("response_records_key", "data")
         batch_size = int(secret_dict.get("batch_size") or config.get("batch_size", 2000))
         batch_size = min(max(batch_size, 1), 20000)
 
-        # Determine if endpoint requires dynamic segment iteration
-        table_cfg = ConfigLoader.get_table_config("peakon", table_name, source_config=config)
+        # Determine if endpoint requires dynamic segment / group iteration
         is_segment_endpoint = (
             "{segment_id}" in endpoint
             or "{context_id}" in endpoint
+            or "{group}" in endpoint
             or bool(table_cfg.get("is_segment_level"))
         )
 
@@ -390,7 +415,7 @@ class PeakonConnector:
         part_number = 1
 
         # =========================================================================
-        # Case A: Dynamic Segment-Level Endpoints
+        # Case A: Dynamic Segment-Level Endpoints ({context_id}, {group})
         # =========================================================================
         if is_segment_endpoint:
             segment_ids = cls._get_dynamic_segment_ids(base_url, bearer_token, config)
@@ -401,24 +426,54 @@ class PeakonConnector:
                 return []
 
             logger.info(
-                f"[Peakon/{table_name}] Processing {len(segment_ids)} segments for endpoint template: {endpoint}"
+                f"[Peakon/{table_name}] Resolving tasks for {len(segment_ids)} segments on endpoint: {endpoint}"
             )
 
-            # Normalize endpoint path (prevent duplicate /api/v1 or missing leading slash)
+            # Normalize endpoint path (normalize multiple slashes e.g. contexts//{context_id} -> contexts/{context_id})
             clean_template = endpoint.strip()
+            if "://" in clean_template:
+                scheme, rest = clean_template.split("://", 1)
+                rest = re.sub(r"/+", "/", rest)
+                clean_template = f"{scheme}://{rest}"
+            else:
+                clean_template = re.sub(r"/+", "/", clean_template)
+
             if not clean_template.startswith("http://") and not clean_template.startswith("https://"):
                 if not clean_template.startswith("/"):
                     clean_template = "/" + clean_template
                 if not clean_template.startswith("/api/v1"):
                     clean_template = f"/api/v1{clean_template}"
 
-            for seg_idx, raw_seg in enumerate(segment_ids, start=1):
-                seg_str = str(raw_seg).strip()
-                # Context ID format in Peakon contexts endpoint: 'segment_<id>'
-                context_id = seg_str if seg_str.startswith("segment_") else f"segment_{seg_str}"
-                raw_segment_id = seg_str[len("segment_"):] if seg_str.startswith("segment_") else seg_str
+            # Check if endpoint requires {group} expansion (e.g. scores_by_category, scores_by_question)
+            has_group = "{group}" in clean_template
+            if has_group:
+                groups_list = table_cfg.get("groups")
+                if not groups_list or not isinstance(groups_list, list):
+                    groups_list = [
+                        "engagement",
+                        "health_wellbeing",
+                        "transformation_change",
+                        "diversity_inclusion",
+                        "onboarding",
+                        "exit",
+                        "environmental_social_governance",
+                        "values",
+                        "other",
+                    ]
+                tasks = [(s_id, str(g).strip()) for s_id in segment_ids for g in groups_list if str(g).strip()]
+            else:
+                tasks = [(s_id, None) for s_id in segment_ids]
 
-                # Peakon context endpoints require context_id ('segment_<id>')
+            def _fetch_single_task(task_tuple: Tuple[Any, Optional[str]]) -> Tuple[List[Dict[str, Any]], int]:
+                raw_seg, group_val = task_tuple
+                seg_str = str(raw_seg).strip()
+                context_id = seg_str if seg_str.startswith("segment_") else f"segment_{seg_str}"
+                raw_segment_id = seg_str
+                for prefix in ("segment_", "valid_", "suppressed_"):
+                    if raw_segment_id.startswith(prefix):
+                        raw_segment_id = raw_segment_id[len(prefix):]
+                        break
+
                 target_id = context_id if "/contexts/" in clean_template else raw_segment_id
 
                 seg_ep = clean_template
@@ -434,20 +489,54 @@ class PeakonConnector:
 
                 seg_ep = seg_ep.replace("{raw_segment_id}", raw_segment_id)
 
-                sep = "&" if "?" in seg_ep else "?"
-                if seg_ep.startswith("http://") or seg_ep.startswith("https://"):
-                    next_url = f"{seg_ep}{sep}per_page={batch_size}"
+                if group_val:
+                    seg_ep = seg_ep.replace("{group}", group_val)
+
+                # Compose query parameters: preserve existing params + default_query + extra_query + custom_query + per_page
+                query_parts = []
+                if "?" in seg_ep:
+                    path_part, existing_q = seg_ep.split("?", 1)
+                    if existing_q:
+                        query_parts.append(existing_q)
                 else:
-                    next_url = f"{base_url}{seg_ep}{sep}per_page={batch_size}"
+                    path_part = seg_ep
+
+                def_q = config.get("default_query") or table_cfg.get("default_query")
+                if def_q and str(def_q).strip():
+                    query_parts.append(str(def_q).strip().lstrip('?'))
+
+                ext_q = table_cfg.get("extra_query")
+                if ext_q and str(ext_q).strip():
+                    query_parts.append(str(ext_q).strip().lstrip('?'))
 
                 if custom_query and str(custom_query).strip():
-                    cq = str(custom_query).strip()
-                    sep_cq = "&" if "?" in next_url else "?"
-                    next_url = f"{next_url}{sep_cq}{cq}"
+                    query_parts.append(str(custom_query).strip().lstrip('?'))
 
-                seg_records_count = 0
+                seen_keys = set()
+                deduped_parts = []
+                for qp in query_parts:
+                    for kv in qp.split("&"):
+                        if not kv:
+                            continue
+                        k = kv.split("=")[0] if "=" in kv else kv
+                        if k not in seen_keys:
+                            seen_keys.add(k)
+                            deduped_parts.append(kv)
+
+                if "per_page" not in seen_keys:
+                    deduped_parts.append(f"per_page={batch_size}")
+
+                final_query = "&".join(deduped_parts)
+                if path_part.startswith("http://") or path_part.startswith("https://"):
+                    next_url: Optional[str] = f"{path_part}?{final_query}" if final_query else path_part
+                else:
+                    next_url = f"{base_url}{path_part}?{final_query}" if final_query else f"{base_url}{path_part}"
+
+                seg_records: List[Dict[str, Any]] = []
+                seg_filtered = 0
+
                 while next_url:
-                    # Ignore 403 / 404 (confidentiality anonymity threshold or empty segment suppression)
+                    # Ignore 403 (confidentiality suppression) and 404 (group without scores/questions)
                     resp_data = cls._execute_request_with_retry(
                         next_url,
                         bearer_token,
@@ -455,7 +544,6 @@ class PeakonConnector:
                     )
 
                     if not resp_data or not isinstance(resp_data, dict):
-                        # Empty response due to 403 / 404 suppression
                         break
 
                     raw_items = resp_data.get(response_key, [])
@@ -466,24 +554,81 @@ class PeakonConnector:
 
                     meta_obj = resp_data.get("meta", {})
 
-                    page_valid_records = []
+                    # Build lookup for JSON:API 'included' resources (e.g. question, category)
+                    included_lookup: Dict[Tuple[str, str], Dict[str, Any]] = {}
+                    for inc in resp_data.get("included", []):
+                        if isinstance(inc, dict):
+                            itype = str(inc.get("type", "")).strip().lower()
+                            iid = str(inc.get("id", "")).strip()
+                            if itype and iid:
+                                included_lookup[(itype, iid)] = inc
+
                     for item in raw_items:
                         if not isinstance(item, dict):
                             continue
 
                         attrs = item.get("attributes")
+                        rec_id = item.get("id") or f"{context_id}_{group_val or ''}_{table_name}".strip('_')
                         record: Dict[str, Any] = {
-                            "id": item.get("id") or f"{context_id}_{table_name}",
+                            "id": rec_id,
                             "type": item.get("type", table_name),
                             "segment_id": raw_segment_id,
                             "context_id": context_id,
                         }
+                        if group_val:
+                            record["group"] = group_val
+                            record["category_group"] = group_val
+
                         if isinstance(attrs, dict):
                             record.update(attrs)
                         else:
                             record.update(item)
 
-                        # Enrich with meta attributes (e.g. meta_interval, meta_participation_rate)
+                        # Enrich with side-loaded JSON:API included resources (questions & categories)
+                        rels = item.get("relationships", {}) if isinstance(item, dict) else {}
+                        if isinstance(rels, dict):
+                            q_data = rels.get("question", {}).get("data")
+                            if isinstance(q_data, dict):
+                                q_id = str(q_data.get("id", "")).strip()
+                                record["question_id"] = q_id
+                                q_inc = included_lookup.get(("question", q_id))
+                                if q_inc and isinstance(q_inc.get("attributes"), dict):
+                                    for qk, qv in q_inc["attributes"].items():
+                                        record[f"question_{qk}"] = qv
+                                    q_rels = q_inc.get("relationships", {})
+                                    if isinstance(q_rels, dict):
+                                        cat_data = q_rels.get("category", {}).get("data")
+                                        if isinstance(cat_data, dict):
+                                            cat_id = str(cat_data.get("id", "")).strip()
+                                            record["category_id"] = cat_id
+                                            cat_inc = included_lookup.get(("category", cat_id))
+                                            if cat_inc and isinstance(cat_inc.get("attributes"), dict):
+                                                for ck, cv in cat_inc["attributes"].items():
+                                                    record[f"category_{ck}"] = cv
+
+                            cat_data = rels.get("category", {}).get("data")
+                            if isinstance(cat_data, dict):
+                                cat_id = str(cat_data.get("id", "")).strip()
+                                record["category_id"] = cat_id
+                                cat_inc = included_lookup.get(("category", cat_id))
+                                if cat_inc and isinstance(cat_inc.get("attributes"), dict):
+                                    for ck, cv in cat_inc["attributes"].items():
+                                        record[f"category_{ck}"] = cv
+
+                        # Float cast scores.size / scores_size to prevent Athena DOUBLE vs BIGINT conflict
+                        if "scores" in record and isinstance(record["scores"], dict):
+                            if "size" in record["scores"] and record["scores"]["size"] is not None:
+                                try:
+                                    record["scores"]["size"] = float(record["scores"]["size"])
+                                except Exception:
+                                    pass
+                        if "scores_size" in record and record["scores_size"] is not None:
+                            try:
+                                record["scores_size"] = float(record["scores_size"])
+                            except Exception:
+                                pass
+
+                        # Enrich with meta attributes (e.g. meta_interval, meta_participation)
                         if isinstance(meta_obj, dict):
                             for mk, mv in meta_obj.items():
                                 if not isinstance(mv, (dict, list)):
@@ -502,45 +647,67 @@ class PeakonConnector:
                         if not is_full_load and cutoff_dt and rec_ts_str:
                             rec_dt = _parse_ts(rec_ts_str)
                             if rec_dt and rec_dt < cutoff_dt:
-                                total_filtered_out += 1
+                                seg_filtered += 1
                                 continue
 
                         if upper_bound_dt and rec_ts_str:
                             rec_dt = _parse_ts(rec_ts_str)
                             if rec_dt and rec_dt > upper_bound_dt:
-                                total_filtered_out += 1
+                                seg_filtered += 1
                                 continue
 
-                        page_valid_records.append(record)
-
-                    seg_records_count += len(page_valid_records)
-                    total_extracted += len(page_valid_records)
-
-                    if on_chunk_callback:
-                        records_buffer.extend(page_valid_records)
-                        if len(records_buffer) >= s3_chunk_size:
-                            on_chunk_callback(records_buffer, part_number)
-                            part_number += 1
-                            records_buffer.clear()
-                    else:
-                        all_records.extend(page_valid_records)
+                        seg_records.append(record)
 
                     # Follow cursor pagination if present
                     links = resp_data.get("links", {})
                     next_url = links.get("next") if isinstance(links, dict) else None
 
-                if seg_idx % 25 == 0 or seg_idx == len(segment_ids):
-                    logger.info(
-                        f"[Peakon/{table_name}] Progress: [{seg_idx}/{len(segment_ids)}] segments processed "
-                        f"({total_extracted} total records accepted so far)."
-                    )
+                return seg_records, seg_filtered
+
+            # Concurrent task execution across all (segment, group) pairs
+            max_workers = int(config.get("max_workers") or config.get("parallel_workers") or 8)
+            max_workers = min(max(max_workers, 1), 16)
+            logger.info(
+                f"[Peakon/{table_name}] Fetching {len(tasks)} tasks concurrently with {max_workers} worker threads..."
+            )
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_task = {
+                    executor.submit(_fetch_single_task, t): t
+                    for t in tasks
+                }
+                for done_idx, future in enumerate(as_completed(future_to_task), start=1):
+                    t_info = future_to_task[future]
+                    try:
+                        seg_records, seg_filtered = future.result()
+                    except Exception as task_err:
+                        logger.warning(f"[Peakon/{table_name}] Failed task {t_info}: {task_err}")
+                        continue
+
+                    total_filtered_out += seg_filtered
+                    total_extracted += len(seg_records)
+
+                    if on_chunk_callback:
+                        records_buffer.extend(seg_records)
+                        if len(records_buffer) >= s3_chunk_size:
+                            on_chunk_callback(records_buffer, part_number)
+                            part_number += 1
+                            records_buffer.clear()
+                    else:
+                        all_records.extend(seg_records)
+
+                    if done_idx % 25 == 0 or done_idx == len(tasks):
+                        logger.info(
+                            f"[Peakon/{table_name}] Progress: [{done_idx}/{len(tasks)}] tasks completed "
+                            f"({total_extracted} total records collected so far)."
+                        )
 
             if on_chunk_callback and records_buffer:
                 on_chunk_callback(records_buffer, part_number)
                 records_buffer.clear()
 
             logger.info(
-                f"[Peakon/{table_name}] Extraction completed across {len(segment_ids)} segments: "
+                f"[Peakon/{table_name}] Extraction completed across {len(tasks)} tasks: "
                 f"{total_extracted} records accepted ({total_filtered_out} records skipped)."
             )
             return all_records if not on_chunk_callback else []
@@ -549,6 +716,13 @@ class PeakonConnector:
         # Case B: Standard Single-Endpoint Tables (answers, employees, segments, etc.)
         # =========================================================================
         clean_endpoint = endpoint.strip()
+        if "://" in clean_endpoint:
+            scheme, rest = clean_endpoint.split("://", 1)
+            rest = re.sub(r"/+", "/", rest)
+            clean_endpoint = f"{scheme}://{rest}"
+        else:
+            clean_endpoint = re.sub(r"/+", "/", clean_endpoint)
+
         if not clean_endpoint.startswith("http://") and not clean_endpoint.startswith("https://"):
             if not clean_endpoint.startswith("/"):
                 clean_endpoint = "/" + clean_endpoint
@@ -561,8 +735,13 @@ class PeakonConnector:
         separator = "&" if "?" in next_url_base else "?"
         next_url = f"{next_url_base}{separator}per_page={batch_size}"
 
+        ext_query = table_cfg.get("extra_query")
+        if ext_query and str(ext_query).strip():
+            sep_eq = "&" if "?" in next_url else "?"
+            next_url = f"{next_url}{sep_eq}{str(ext_query).strip().lstrip('?')}"
+
         if custom_query and str(custom_query).strip():
-            cq = str(custom_query).strip()
+            cq = str(custom_query).strip().lstrip('?')
             sep_cq = "&" if "?" in next_url else "?"
             next_url = f"{next_url}{sep_cq}{cq}"
 
@@ -606,6 +785,18 @@ class PeakonConnector:
                     record.update(attrs)
                 else:
                     record.update(item)
+
+                if "scores" in record and isinstance(record["scores"], dict):
+                    if "size" in record["scores"] and record["scores"]["size"] is not None:
+                        try:
+                            record["scores"]["size"] = float(record["scores"]["size"])
+                        except Exception:
+                            pass
+                if "scores_size" in record and record["scores_size"] is not None:
+                    try:
+                        record["scores_size"] = float(record["scores_size"])
+                    except Exception:
+                        pass
 
                 if isinstance(meta_obj, dict):
                     for mk, mv in meta_obj.items():
