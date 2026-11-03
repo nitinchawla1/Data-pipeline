@@ -295,6 +295,13 @@ class PeakonConnector:
 
         logger.info(f"Fetching segment IDs directly from Peakon API: {curr_url}...")
         api_segment_ids: List[str] = []
+        # Check segment limit for discovery
+        seg_limit_val = source_config.get("segment_limit", 50)
+        try:
+            discovery_limit = int(seg_limit_val) if seg_limit_val is not None else 50
+        except (ValueError, TypeError):
+            discovery_limit = 50
+
         try:
             while curr_url:
                 resp = cls._execute_request_with_retry(curr_url, bearer_token)
@@ -308,13 +315,21 @@ class PeakonConnector:
                     if isinstance(item, dict) and item.get("id"):
                         api_segment_ids.append(str(item["id"]).strip())
 
+                if discovery_limit > 0 and len(api_segment_ids) >= discovery_limit:
+                    logger.info(
+                        f"Discovery limit reached ({len(api_segment_ids)} >= {discovery_limit}). Stopping pagination early."
+                    )
+                    break
+
                 links = resp.get("links", {})
                 curr_url = links.get("next") if isinstance(links, dict) else None
 
             if api_segment_ids:
                 deduped = list(dict.fromkeys(api_segment_ids))
+                if discovery_limit > 0:
+                    deduped = deduped[:discovery_limit]
                 cls._cached_segment_ids = deduped
-                logger.info(f"Acquired {len(deduped)} segment IDs from Peakon API.")
+                logger.info(f"Acquired {len(deduped)} segment IDs from Peakon API (segment_limit={discovery_limit}).")
                 return deduped
         except Exception as api_err:
             logger.error(f"Failed to fetch segment IDs from Peakon API: {api_err}")
@@ -424,6 +439,21 @@ class PeakonConnector:
                     f"[Peakon/{table_name}] No segment IDs available to query. Exiting table extraction."
                 )
                 return []
+
+            # Segment limit for testing / staging (defaults to 50, set to 0 or null in bronze_config.json for full run)
+            seg_limit_raw = table_cfg.get("segment_limit")
+            if seg_limit_raw is None:
+                seg_limit_raw = config.get("segment_limit", 50)
+            try:
+                segment_limit = int(seg_limit_raw) if seg_limit_raw is not None else 50
+            except (ValueError, TypeError):
+                segment_limit = 50
+
+            if segment_limit > 0 and len(segment_ids) > segment_limit:
+                logger.info(
+                    f"[Peakon/{table_name}] Test limit active: Limiting from {len(segment_ids)} segments down to first {segment_limit} segments."
+                )
+                segment_ids = segment_ids[:segment_limit]
 
             logger.info(
                 f"[Peakon/{table_name}] Resolving tasks for {len(segment_ids)} segments on endpoint: {endpoint}"
