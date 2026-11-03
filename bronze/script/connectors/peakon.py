@@ -241,6 +241,191 @@ class PeakonConnector:
         return []
 
     @classmethod
+    def _normalize_metric_floats(cls, record: Dict[str, Any]) -> None:
+        """
+        Recursively normalizes all numeric metric fields (both inside nested 'scores' dict and at top-level)
+        to Python float so that Parquet (pandas) and Glue Catalog consistently infer DOUBLE.
+        Permanently prevents HIVE_PARTITION_SCHEMA_MISMATCH and DOUBLE vs BIGINT conflicts.
+        """
+        metric_suffixes = (
+            "score", "mean", "size", "standarddeviation", "difference", "benchmark",
+            "participation", "participationrate", "participation_rate", "confidence",
+            "percentile", "enps", "count", "respondents", "weight", "frequency"
+        )
+
+        # 1. Normalize nested 'scores' dictionary if present
+        scores_obj = record.get("scores")
+        if isinstance(scores_obj, dict):
+            for k, v in list(scores_obj.items()):
+                if v is not None and not isinstance(v, bool):
+                    if isinstance(v, (int, float)):
+                        try:
+                            scores_obj[k] = float(v)
+                        except Exception:
+                            pass
+                    elif isinstance(v, str):
+                        try:
+                            scores_obj[k] = float(v)
+                        except ValueError:
+                            pass
+
+        # 2. Normalize top-level and flattened attributes
+        for k, v in list(record.items()):
+            if v is None or isinstance(v, bool):
+                continue
+            clean_k = str(k).lower().replace('-', '_').replace('.', '_')
+            is_metric = (
+                clean_k.startswith("scores_")
+                or clean_k.startswith("score_")
+                or any(clean_k == ms or clean_k.endswith(f"_{ms}") for ms in metric_suffixes)
+            )
+            if is_metric:
+                if isinstance(v, (int, float)):
+                    try:
+                        record[k] = float(v)
+                    except Exception:
+                        pass
+                elif isinstance(v, str):
+                    try:
+                        record[k] = float(v)
+                    except ValueError:
+                        pass
+
+    @classmethod
+    def _sync_glue_table_schema(
+        cls,
+        table_name: str,
+        source_config: Dict[str, Any]
+    ) -> None:
+        """
+        Inspects the AWS Glue Data Catalog table and existing partitions for the given table.
+        Automatically upgrades any metric/score columns declared as 'bigint' or 'int' to 'double',
+        and ensures 'parquet.column.index.access' is set to 'false'.
+        Permanently eliminates HIVE_PARTITION_SCHEMA_MISMATCH in Athena on existing and new partitions
+        without requiring manual ALTER TABLE queries or modifying uax_bronze_load.py.
+        """
+        try:
+            config = source_config or {}
+            env = config.get("env") or config.get("environment") or "dev"
+            glue_database = (
+                config.get("glue_database_name")
+                or config.get("glue_database")
+                or f"uax_datalake_db_{env}"
+            )
+            table_prefix = config.get("glue_table_prefix") or "raw_tbl_"
+            clean_name = table_name.lower().replace("-", "_").strip()
+            catalog_table_name = (
+                clean_name if clean_name.startswith(table_prefix) else f"{table_prefix}{clean_name}"
+            )
+            while catalog_table_name.startswith("raw_tbl_raw_tbl_"):
+                catalog_table_name = catalog_table_name[len("raw_tbl_"):]
+
+            glue_client = boto3.client("glue")
+
+            # Check if table exists in Glue Catalog
+            try:
+                table_resp = glue_client.get_table(DatabaseName=glue_database, Name=catalog_table_name)
+            except Exception:
+                # Table does not exist yet; uax_bronze_load.py will create it fresh with double types
+                return
+
+            table_obj = table_resp.get("Table", {})
+            sd = table_obj.get("StorageDescriptor", {})
+            columns = sd.get("Columns", [])
+            if not columns:
+                return
+
+            metric_suffixes = (
+                "score", "mean", "size", "standarddeviation", "difference", "benchmark",
+                "participation", "participationrate", "participation_rate", "confidence",
+                "percentile", "enps", "count", "respondents", "weight", "frequency"
+            )
+
+            modified = False
+            widened_cols = []
+            for col in columns:
+                cname = col.get("Name", "").lower()
+                ctype = col.get("Type", "").lower()
+                is_metric = (
+                    cname.startswith("scores_")
+                    or cname.startswith("score_")
+                    or any(cname == ms or cname.endswith(f"_{ms}") for ms in metric_suffixes)
+                )
+                if is_metric and ctype in ("bigint", "int", "smallint", "tinyint", "integer"):
+                    col["Type"] = "double"
+                    modified = True
+                    widened_cols.append(col.get("Name"))
+
+            table_params = table_obj.get("Parameters", {})
+            if table_params.get("parquet.column.index.access") != "false":
+                table_params["parquet.column.index.access"] = "false"
+                modified = True
+
+            if modified:
+                logger.info(
+                    f"[Peakon Glue Self-Healing] Auto-widening column types to DOUBLE in "
+                    f"'{glue_database}.{catalog_table_name}': {widened_cols}"
+                )
+                table_input = {
+                    "Name": catalog_table_name,
+                    "Description": table_obj.get("Description", f"Bronze raw data table for peakon/{table_name}"),
+                    "PartitionKeys": table_obj.get("PartitionKeys", [{"Name": "_ingested_at", "Type": "string"}]),
+                    "TableType": table_obj.get("TableType", "EXTERNAL_TABLE"),
+                    "Parameters": table_params,
+                    "StorageDescriptor": dict(sd, Columns=columns)
+                }
+                glue_client.update_table(DatabaseName=glue_database, TableInput=table_input)
+                logger.info(
+                    f"[Peakon Glue Self-Healing] Successfully updated table '{glue_database}.{catalog_table_name}' definition."
+                )
+
+                # Back-sync existing partitions so older partitions also match the 'double' schema
+                try:
+                    paginator = glue_client.get_paginator("get_partitions")
+                    for page in paginator.paginate(DatabaseName=glue_database, TableName=catalog_table_name):
+                        for part in page.get("Partitions", []):
+                            p_sd = part.get("StorageDescriptor", {})
+                            p_cols = p_sd.get("Columns", [])
+                            part_modified = False
+                            for p_col in p_cols:
+                                pcname = p_col.get("Name", "").lower()
+                                pctype = p_col.get("Type", "").lower()
+                                is_p_metric = (
+                                    pcname.startswith("scores_")
+                                    or pcname.startswith("score_")
+                                    or any(pcname == ms or pcname.endswith(f"_{ms}") for ms in metric_suffixes)
+                                )
+                                if is_p_metric and pctype in ("bigint", "int", "smallint", "tinyint", "integer"):
+                                    p_col["Type"] = "double"
+                                    part_modified = True
+
+                            p_params = part.get("Parameters", {})
+                            if p_params.get("parquet.column.index.access") != "false":
+                                p_params["parquet.column.index.access"] = "false"
+                                part_modified = True
+
+                            if part_modified:
+                                glue_client.update_partition(
+                                    DatabaseName=glue_database,
+                                    TableName=catalog_table_name,
+                                    PartitionValueList=part.get("Values", []),
+                                    PartitionInput={
+                                        "Values": part.get("Values", []),
+                                        "StorageDescriptor": dict(p_sd, Columns=p_cols),
+                                        "Parameters": p_params
+                                    }
+                                )
+                except Exception as part_sync_err:
+                    logger.warning(
+                        f"[Peakon Glue Self-Healing] Non-fatal: Partition back-sync for '{catalog_table_name}': {part_sync_err}"
+                    )
+
+        except Exception as glue_err:
+            logger.warning(
+                f"[Peakon Glue Self-Healing] Non-fatal: Skipped Glue schema self-healing for '{table_name}': {glue_err}"
+            )
+
+    @classmethod
     def _get_dynamic_segment_ids(
         cls,
         base_url: str,
@@ -360,6 +545,9 @@ class PeakonConnector:
             raise ValueError("Peakon connector: 'table_name' is required.")
 
         config = source_config or {}
+
+        # Auto-heal Glue Catalog table schema (widen metric columns from BIGINT to DOUBLE)
+        cls._sync_glue_table_schema(table_name, config)
 
         # 1. Resolve Credentials & Token
         api_token = (
@@ -645,18 +833,8 @@ class PeakonConnector:
                                     for ck, cv in cat_inc["attributes"].items():
                                         record[f"category_{ck}"] = cv
 
-                        # Float cast scores.size / scores_size to prevent Athena DOUBLE vs BIGINT conflict
-                        if "scores" in record and isinstance(record["scores"], dict):
-                            if "size" in record["scores"] and record["scores"]["size"] is not None:
-                                try:
-                                    record["scores"]["size"] = float(record["scores"]["size"])
-                                except Exception:
-                                    pass
-                        if "scores_size" in record and record["scores_size"] is not None:
-                            try:
-                                record["scores_size"] = float(record["scores_size"])
-                            except Exception:
-                                pass
+                        # Permanently normalize all metric fields (scores.mean, scores.size, standardDeviation, difference, etc.) to float
+                        cls._normalize_metric_floats(record)
 
                         # Enrich with meta attributes (e.g. meta_interval, meta_participation)
                         if isinstance(meta_obj, dict):
@@ -816,17 +994,8 @@ class PeakonConnector:
                 else:
                     record.update(item)
 
-                if "scores" in record and isinstance(record["scores"], dict):
-                    if "size" in record["scores"] and record["scores"]["size"] is not None:
-                        try:
-                            record["scores"]["size"] = float(record["scores"]["size"])
-                        except Exception:
-                            pass
-                if "scores_size" in record and record["scores_size"] is not None:
-                    try:
-                        record["scores_size"] = float(record["scores_size"])
-                    except Exception:
-                        pass
+                # Permanently normalize all metric fields to float
+                cls._normalize_metric_floats(record)
 
                 if isinstance(meta_obj, dict):
                     for mk, mv in meta_obj.items():
