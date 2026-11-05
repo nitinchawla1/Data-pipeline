@@ -418,7 +418,35 @@
             "other"
           ],
           "extra_query": "include=question.category"
-        }
+        },
+        "peakon_categories": {
+          "custom_endpoint": "/api/v1/scores/contexts/company_329/questions/group/{group}?include=question.category",
+          "endpoint": "/api/v1/scores/contexts/company_329/questions/group/{group}?include=question.category",
+          "groups": [
+            "engagement",
+            "health_wellbeing",
+            "transformation_change",
+            "other"
+          ],
+          "records_from": "included",
+          "included_type": "categories",
+          "initial_load_date": "1900-01-01 00:00:00",
+          "upper_bound": ""
+        },
+        "peakon_questions": {
+          "custom_endpoint": "/api/v1/scores/contexts/company_329/questions/group/{group}?include=question.category",
+          "endpoint": "/api/v1/scores/contexts/company_329/questions/group/{group}?include=question.category",
+          "groups": [
+            "engagement",
+            "health_wellbeing",
+            "transformation_change",
+            "other"
+          ],
+          "records_from": "included",
+          "included_type": "questions",
+          "initial_load_date": "1900-01-01 00:00:00",
+          "upper_bound": ""
+        }        
       }
     }
   }
