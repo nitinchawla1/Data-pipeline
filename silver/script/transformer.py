@@ -158,32 +158,31 @@ class SilverTransformer:
             logger.info(f"Removing Bronze system metadata columns from Silver processing: {bronze_drops}")
             df = df.drop(*bronze_drops)
 
-        # 3. Make all columns string by default (unless explicitly cast in column_casts)
-        # Guarantees schema consistency across batches and prevents type conflicts with nested structs/primitives
+        # 3. Make all columns string by default & 4. Standardize timestamp formats to 'YYYY-MM-DD HH:MM:SS'
+        # Guarantees schema consistency across batches and prevents type conflicts with nested structs/primitives.
+        # Vectorized via a single DataFrame.select projection to prevent Py4J IPC bottlenecks and Catalyst plan depth explosion.
         cast_all_str = table_cfg.get('cast_all_columns_to_string', True)
-        if cast_all_str:
-            logger.info(f"Casting all payload columns to string by default for '{source_system}.{table_name}'...")
-            silver_tech = {'_valid_from', '_valid_to', '_is_current', '_is_deleted', '_inserted_at', '_updated_at'}
-            for c in df.columns:
-                if c not in silver_tech:
-                    df = df.withColumn(c, col(c).cast("string"))
+        silver_tech = {'_valid_from', '_valid_to', '_is_current', '_is_deleted', '_inserted_at', '_updated_at'}
+        iso_ts_pattern = r'^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}(?::?\d{2})?)?$'
 
-        # 4. Standardize timestamp formats across all columns to 'YYYY-MM-DD HH:MM:SS'
-        # Converts any ISO-8601 strings (e.g. '2024-03-01T15:30:00Z', '+00:00', millis) to standardized format
-        silver_tech_set = {'_valid_from', '_valid_to', '_is_current', '_is_deleted', '_inserted_at', '_updated_at'}
+        if cast_all_str:
+            logger.info(f"Casting all payload columns to string and standardizing timestamp formats for '{source_system}.{table_name}'...")
+        else:
+            logger.info(f"Standardizing timestamp formats across payload columns for '{source_system}.{table_name}'...")
+
+        select_exprs = []
         for c in df.columns:
-            if c not in silver_tech_set:
-                df = df.withColumn(
-                    c,
-                    when(
-                        col(c).rlike(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'),
-                        regexp_replace(
-                            col(c),
-                            r'^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}(?::?\d{2})?)?$',
-                            '$1 $2'
-                        )
-                    ).otherwise(col(c))
-                )
+            if c in silver_tech:
+                select_exprs.append(col(c))
+            else:
+                c_expr = col(c).cast("string") if cast_all_str else col(c)
+                standardized = when(
+                    c_expr.rlike(r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'),
+                    regexp_replace(c_expr, iso_ts_pattern, '$1 $2')
+                ).otherwise(c_expr).alias(c)
+                select_exprs.append(standardized)
+
+        df = df.select(*select_exprs)
 
         # 5. Clean illegal characters dynamically if expression is configured for this table
         illegal_expr = table_cfg.get('clean_illegal_chars_expression') or table_cfg.get('clean_illegal_chars_pattern')
@@ -197,15 +196,21 @@ class SilverTransformer:
             logger.info(f"Applying filter expression: '{filter_expr}'")
             df = df.filter(expr(filter_expr))
 
-        # 7. Apply Column Casts
+        # 7. Apply Column Casts (vectorized in a single projection)
         column_casts = table_cfg.get('column_casts', {})
-        for column_name, target_type in column_casts.items():
-            if column_name in df.columns:
-                logger.info(f"Casting column '{column_name}' -> '{target_type}'")
-                if str(target_type).strip().lower() in ('timestamp', 'datetime'):
-                    df = df.withColumn(column_name, to_timestamp(col(column_name), "yyyy-MM-dd HH:mm:ss"))
+        if column_casts:
+            cast_exprs = []
+            for c in df.columns:
+                if c in column_casts:
+                    target_type = column_casts[c]
+                    logger.info(f"Casting column '{c}' -> '{target_type}'")
+                    if str(target_type).strip().lower() in ('timestamp', 'datetime'):
+                        cast_exprs.append(to_timestamp(col(c), "yyyy-MM-dd HH:mm:ss").alias(c))
+                    else:
+                        cast_exprs.append(col(c).cast(target_type).alias(c))
                 else:
-                    df = df.withColumn(column_name, col(column_name).cast(target_type))
+                    cast_exprs.append(col(c))
+            df = df.select(*cast_exprs)
 
         # 8. Apply Custom SQL Expressions
         custom_expressions = table_cfg.get('custom_expressions', {})
@@ -318,67 +323,59 @@ class SilverTransformer:
 
         CRITICAL: All system-generated audit columns are appended at the very LAST of the table.
         """
-        cols = df.columns
+        cols = set(df.columns)
 
         # 1. Effective Validity Window (_valid_from, _valid_to) & Current Flag (_is_current: 'Y'/'N')
         if order_col_name and order_col_name in cols:
-            df = df.withColumn("_valid_from", to_timestamp(date_format(coalesce(col(order_col_name).cast("timestamp"), current_timestamp()), "yyyy-MM-dd HH:mm:ss")))
-        elif "_valid_from" not in cols:
-            df = df.withColumn("_valid_from", to_timestamp(date_format(current_timestamp(), "yyyy-MM-dd HH:mm:ss")))
+            valid_from_expr = to_timestamp(date_format(coalesce(col(order_col_name).cast("timestamp"), current_timestamp()), "yyyy-MM-dd HH:mm:ss"))
+        elif "_valid_from" in cols:
+            valid_from_expr = col("_valid_from")
+        else:
+            valid_from_expr = to_timestamp(date_format(current_timestamp(), "yyyy-MM-dd HH:mm:ss"))
 
-        if "_valid_to" not in cols:
-            df = df.withColumn("_valid_to", to_timestamp(lit(high_date_val)))
+        if "_valid_to" in cols:
+            valid_to_expr = col("_valid_to")
+        else:
+            valid_to_expr = to_timestamp(lit(high_date_val))
 
         # Current flag: 'Y' for active/current record, 'N' for expired/historical
-        if "_is_current" not in cols:
-            df = df.withColumn("_is_current", lit("Y"))
+        if "_is_current" in cols:
+            is_current_expr = when(upper(col("_is_current").cast("string")).isin("Y", "TRUE", "1"), lit("Y")).otherwise(lit("N"))
         else:
-            df = df.withColumn(
-                "_is_current",
-                when(upper(col("_is_current").cast("string")).isin("Y", "TRUE", "1"), lit("Y")).otherwise(lit("N"))
-            )
+            is_current_expr = lit("Y")
 
         # 2. Soft-deletion status (_is_deleted: 'Y'/'N')
         if "_is_deleted" in cols:
-            df = df.withColumn(
-                "_is_deleted",
-                when(upper(col("_is_deleted").cast("string")).isin("Y", "TRUE", "1"), lit("Y")).otherwise(lit("N"))
-            )
+            is_deleted_expr = when(upper(col("_is_deleted").cast("string")).isin("Y", "TRUE", "1"), lit("Y")).otherwise(lit("N"))
         elif "sys_is_deleted" in cols:
-            df = df.withColumn(
-                "_is_deleted",
-                when(upper(col("sys_is_deleted").cast("string")).isin("Y", "TRUE", "1"), lit("Y")).otherwise(lit("N"))
-            )
+            is_deleted_expr = when(upper(col("sys_is_deleted").cast("string")).isin("Y", "TRUE", "1"), lit("Y")).otherwise(lit("N"))
         elif "is_deleted" in cols:
-            df = df.withColumn(
-                "_is_deleted",
-                when(upper(col("is_deleted").cast("string")).isin("Y", "TRUE", "1"), lit("Y")).otherwise(lit("N"))
-            )
+            is_deleted_expr = when(upper(col("is_deleted").cast("string")).isin("Y", "TRUE", "1"), lit("Y")).otherwise(lit("N"))
         elif "deleted" in cols:
-            df = df.withColumn(
-                "_is_deleted",
-                when(upper(col("deleted").cast("string")).isin("Y", "TRUE", "1"), lit("Y")).otherwise(lit("N"))
-            )
+            is_deleted_expr = when(upper(col("deleted").cast("string")).isin("Y", "TRUE", "1"), lit("Y")).otherwise(lit("N"))
         else:
-            df = df.withColumn("_is_deleted", lit("N"))
+            is_deleted_expr = lit("N")
 
         # 3. Technical timestamps (_inserted_at, _updated_at)
-        if "_inserted_at" not in cols:
-            df = df.withColumn("_inserted_at", to_timestamp(date_format(current_timestamp(), "yyyy-MM-dd HH:mm:ss")))
-
-        df = df.withColumn("_updated_at", to_timestamp(date_format(current_timestamp(), "yyyy-MM-dd HH:mm:ss")))
+        inserted_at_expr = col("_inserted_at") if "_inserted_at" in cols else to_timestamp(date_format(current_timestamp(), "yyyy-MM-dd HH:mm:ss"))
+        updated_at_expr = to_timestamp(date_format(current_timestamp(), "yyyy-MM-dd HH:mm:ss"))
 
         # 4. Strip any Bronze metadata columns so they never enter Silver tables
         bronze_system_cols = {'_ingested_at', '_source_system', '_table_name', '_execution_id', '_batch_id', '_raw_payload'}
-        remaining_bronze = [c for c in df.columns if c in bronze_system_cols]
-        if remaining_bronze:
-            df = df.drop(*remaining_bronze)
+        silver_tech_cols_set = {'_valid_from', '_valid_to', '_is_current', '_is_deleted', '_inserted_at', '_updated_at'}
 
         # 5. Column Ordering: All business payload columns FIRST, system generated audit columns LAST
-        silver_tech_cols = ['_valid_from', '_valid_to', '_is_current', '_is_deleted', '_inserted_at', '_updated_at']
-        business_cols = [c for c in df.columns if c not in silver_tech_cols]
-        df = df.select(*(business_cols + silver_tech_cols))
+        business_cols = [col(c) for c in df.columns if c not in silver_tech_cols_set and c not in bronze_system_cols]
+        audit_cols = [
+            valid_from_expr.alias("_valid_from"),
+            valid_to_expr.alias("_valid_to"),
+            is_current_expr.alias("_is_current"),
+            is_deleted_expr.alias("_is_deleted"),
+            inserted_at_expr.alias("_inserted_at"),
+            updated_at_expr.alias("_updated_at")
+        ]
 
+        df = df.select(*(business_cols + audit_cols))
         return df
 
     @classmethod
