@@ -31,7 +31,7 @@ import urllib.request
 import urllib.parse
 from urllib.error import HTTPError, URLError
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
@@ -66,12 +66,49 @@ def _parse_ts(ts_val: Any) -> Optional[datetime]:
         return None
 
 
+def build_lookup_records(
+    resp_data: Dict[str, Any],
+    included_type: str,
+    group: Optional[str],
+    seen_ids: Set[str]
+) -> List[Dict[str, Any]]:
+    """One record per new id of the wanted type in resp_data["included"]."""
+    records = []
+    for inc in resp_data.get("included") or []:
+        if not isinstance(inc, dict) or str(inc.get("type", "")).lower() != included_type:
+            continue
+        rec_id = str(inc.get("id", "")).strip()
+        if not rec_id or rec_id in seen_ids:
+            continue
+        seen_ids.add(rec_id)
+
+        record: Dict[str, Any] = {"id": rec_id, "type": included_type, "called_for_group": group}
+        attrs = inc.get("attributes")
+        if isinstance(attrs, dict):
+            record.update(attrs)
+
+        # A question links to its category: keep that id so Gold can join question -> category
+        rels = inc.get("relationships") or {}
+        cat = (rels.get("category") or {}).get("data") if isinstance(rels, dict) else None
+        if isinstance(cat, dict) and cat.get("id") is not None:
+            record["category_id"] = str(cat["id"]).strip()
+
+        # Lists and nested sections as JSON text, so flattening cannot split rows or clash on types
+        for k, v in list(record.items()):
+            if isinstance(v, (list, dict)):
+                record[k] = json.dumps(v)
+        records.append(record)
+    return records
+
+
 class PeakonConnector:
     """
     Workday Peakon Employee Voice API connector.
     Handles automatic JWT authentication, JSON:API unwrapping, delta date filtering,
     dynamic segment iteration for context endpoints, and cursor pagination via links.next.
     """
+
+    build_lookup_records = staticmethod(build_lookup_records)
 
     _jwt_cache: Dict[str, Tuple[str, float]] = {}
     _cached_segment_ids: List[str] = []
@@ -682,36 +719,14 @@ class PeakonConnector:
         total_filtered_out = 0
         part_number = 1
 
+        records_from = table_cfg.get("records_from", "data")
+        included_type = str(table_cfg.get("included_type", "")).strip().lower()
+        seen_ids: Set[str] = set()
+
         # =========================================================================
         # Case A: Dynamic Segment-Level Endpoints ({context_id}, {group})
         # =========================================================================
         if is_segment_endpoint:
-            segment_ids = cls._get_dynamic_segment_ids(base_url, bearer_token, config)
-            if not segment_ids:
-                logger.warning(
-                    f"[Peakon/{table_name}] No segment IDs available to query. Exiting table extraction."
-                )
-                return []
-
-            # Segment limit for testing / staging (defaults to 50, set to 0 or null in bronze_config.json for full run)
-            seg_limit_raw = table_cfg.get("segment_limit")
-            if seg_limit_raw is None:
-                seg_limit_raw = config.get("segment_limit", 50)
-            try:
-                segment_limit = int(seg_limit_raw) if seg_limit_raw is not None else 50
-            except (ValueError, TypeError):
-                segment_limit = 50
-
-            if segment_limit > 0 and len(segment_ids) > segment_limit:
-                logger.info(
-                    f"[Peakon/{table_name}] Test limit active: Limiting from {len(segment_ids)} segments down to first {segment_limit} segments."
-                )
-                segment_ids = segment_ids[:segment_limit]
-
-            logger.info(
-                f"[Peakon/{table_name}] Resolving tasks for {len(segment_ids)} segments on endpoint: {endpoint}"
-            )
-
             # Normalize endpoint path (normalize multiple slashes e.g. contexts//{context_id} -> contexts/{context_id})
             clean_template = endpoint.strip()
             if "://" in clean_template:
@@ -726,6 +741,44 @@ class PeakonConnector:
                     clean_template = "/" + clean_template
                 if not clean_template.startswith("/api/v1"):
                     clean_template = f"/api/v1{clean_template}"
+
+            needs_segments = (
+                "{segment_id}" in clean_template
+                or "{context_id}" in clean_template
+                or bool(table_cfg.get("is_segment_level"))
+            )
+
+            if needs_segments:
+                segment_ids = cls._get_dynamic_segment_ids(base_url, bearer_token, config)
+                if not segment_ids:
+                    logger.warning(
+                        f"[Peakon/{table_name}] No segment IDs available to query. Exiting table extraction."
+                    )
+                    return []
+
+                # Segment limit for testing / staging (defaults to 50, set to 0 or null in bronze_config.json for full run)
+                seg_limit_raw = table_cfg.get("segment_limit")
+                if seg_limit_raw is None:
+                    seg_limit_raw = config.get("segment_limit", 50)
+                try:
+                    segment_limit = int(seg_limit_raw) if seg_limit_raw is not None else 50
+                except (ValueError, TypeError):
+                    segment_limit = 50
+
+                if segment_limit > 0 and len(segment_ids) > segment_limit:
+                    logger.info(
+                        f"[Peakon/{table_name}] Test limit active: Limiting from {len(segment_ids)} segments down to first {segment_limit} segments."
+                    )
+                    segment_ids = segment_ids[:segment_limit]
+
+                logger.info(
+                    f"[Peakon/{table_name}] Resolving tasks for {len(segment_ids)} segments on endpoint: {endpoint}"
+                )
+            else:
+                segment_ids = [None]
+                logger.info(
+                    f"[Peakon/{table_name}] Resolving tasks for non-segment endpoint on endpoint: {endpoint}"
+                )
 
             # Check if endpoint requires {group} expansion (e.g. scores_by_category, scores_by_question)
             has_group = "{group}" in clean_template
@@ -749,28 +802,33 @@ class PeakonConnector:
 
             def _fetch_single_task(task_tuple: Tuple[Any, Optional[str]]) -> Tuple[List[Dict[str, Any]], int]:
                 raw_seg, group_val = task_tuple
-                seg_str = str(raw_seg).strip()
-                context_id = seg_str if seg_str.startswith("segment_") else f"segment_{seg_str}"
-                raw_segment_id = seg_str
-                for prefix in ("segment_", "valid_", "suppressed_"):
-                    if raw_segment_id.startswith(prefix):
-                        raw_segment_id = raw_segment_id[len(prefix):]
-                        break
+                if raw_seg is not None:
+                    seg_str = str(raw_seg).strip()
+                    context_id = seg_str if seg_str.startswith("segment_") else f"segment_{seg_str}"
+                    raw_segment_id = seg_str
+                    for prefix in ("segment_", "valid_", "suppressed_"):
+                        if raw_segment_id.startswith(prefix):
+                            raw_segment_id = raw_segment_id[len(prefix):]
+                            break
 
-                target_id = context_id if "/contexts/" in clean_template else raw_segment_id
+                    target_id = context_id if "/contexts/" in clean_template else raw_segment_id
 
-                seg_ep = clean_template
-                if "segment_{segment_id}" in seg_ep:
-                    seg_ep = seg_ep.replace("segment_{segment_id}", context_id)
+                    seg_ep = clean_template
+                    if "segment_{segment_id}" in seg_ep:
+                        seg_ep = seg_ep.replace("segment_{segment_id}", context_id)
+                    else:
+                        seg_ep = seg_ep.replace("{segment_id}", target_id)
+
+                    if "segment_{context_id}" in seg_ep:
+                        seg_ep = seg_ep.replace("segment_{context_id}", context_id)
+                    else:
+                        seg_ep = seg_ep.replace("{context_id}", context_id)
+
+                    seg_ep = seg_ep.replace("{raw_segment_id}", raw_segment_id)
                 else:
-                    seg_ep = seg_ep.replace("{segment_id}", target_id)
-
-                if "segment_{context_id}" in seg_ep:
-                    seg_ep = seg_ep.replace("segment_{context_id}", context_id)
-                else:
-                    seg_ep = seg_ep.replace("{context_id}", context_id)
-
-                seg_ep = seg_ep.replace("{raw_segment_id}", raw_segment_id)
+                    seg_ep = clean_template
+                    context_id = ""
+                    raw_segment_id = ""
 
                 if group_val:
                     seg_ep = seg_ep.replace("{group}", group_val)
@@ -829,107 +887,111 @@ class PeakonConnector:
                     if not resp_data or not isinstance(resp_data, dict):
                         break
 
-                    raw_items = resp_data.get(response_key, [])
-                    if isinstance(raw_items, dict):
-                        raw_items = [raw_items]
-                    elif not isinstance(raw_items, list):
-                        raw_items = []
+                    if records_from == "included":
+                        page_valid_records = build_lookup_records(resp_data, included_type, group_val, seen_ids)
+                        seg_records.extend(page_valid_records)
+                    else:
+                        raw_items = resp_data.get(response_key, [])
+                        if isinstance(raw_items, dict):
+                            raw_items = [raw_items]
+                        elif not isinstance(raw_items, list):
+                            raw_items = []
 
-                    meta_obj = resp_data.get("meta", {})
+                        meta_obj = resp_data.get("meta", {})
 
-                    # Build lookup for JSON:API 'included' resources (e.g. question, category)
-                    included_lookup: Dict[Tuple[str, str], Dict[str, Any]] = {}
-                    for inc in resp_data.get("included", []):
-                        if isinstance(inc, dict):
-                            itype = str(inc.get("type", "")).strip().lower()
-                            iid = str(inc.get("id", "")).strip()
-                            if itype and iid:
-                                included_lookup[(itype, iid)] = inc
+                        # Build lookup for JSON:API 'included' resources (e.g. question, category)
+                        included_lookup: Dict[Tuple[str, str], Dict[str, Any]] = {}
+                        for inc in resp_data.get("included", []):
+                            if isinstance(inc, dict):
+                                itype = str(inc.get("type", "")).strip().lower()
+                                iid = str(inc.get("id", "")).strip()
+                                if itype and iid:
+                                    included_lookup[(itype, iid)] = inc
 
-                    for item in raw_items:
-                        if not isinstance(item, dict):
-                            continue
-
-                        attrs = item.get("attributes")
-                        rec_id = item.get("id") or f"{context_id}_{group_val or ''}_{table_name}".strip('_')
-                        record: Dict[str, Any] = {
-                            "id": rec_id,
-                            "type": item.get("type", table_name),
-                            "segment_id": raw_segment_id,
-                            "context_id": context_id,
-                        }
-                        if group_val:
-                            record["group"] = group_val
-                            record["category_group"] = group_val
-
-                        if isinstance(attrs, dict):
-                            record.update(attrs)
-                        else:
-                            record.update(item)
-
-                        # Enrich with side-loaded JSON:API included resources (questions & categories)
-                        rels = item.get("relationships", {}) if isinstance(item, dict) else {}
-                        if isinstance(rels, dict):
-                            q_data = rels.get("question", {}).get("data")
-                            if isinstance(q_data, dict):
-                                q_id = str(q_data.get("id", "")).strip()
-                                record["question_id"] = q_id
-                                q_inc = included_lookup.get(("question", q_id))
-                                if q_inc and isinstance(q_inc.get("attributes"), dict):
-                                    for qk, qv in q_inc["attributes"].items():
-                                        record[f"question_{qk}"] = qv
-                                    q_rels = q_inc.get("relationships", {})
-                                    if isinstance(q_rels, dict):
-                                        cat_data = q_rels.get("category", {}).get("data")
-                                        if isinstance(cat_data, dict):
-                                            cat_id = str(cat_data.get("id", "")).strip()
-                                            record["category_id"] = cat_id
-                                            cat_inc = included_lookup.get(("category", cat_id))
-                                            if cat_inc and isinstance(cat_inc.get("attributes"), dict):
-                                                for ck, cv in cat_inc["attributes"].items():
-                                                    record[f"category_{ck}"] = cv
-
-                            cat_data = rels.get("category", {}).get("data")
-                            if isinstance(cat_data, dict):
-                                cat_id = str(cat_data.get("id", "")).strip()
-                                record["category_id"] = cat_id
-                                cat_inc = included_lookup.get(("category", cat_id))
-                                if cat_inc and isinstance(cat_inc.get("attributes"), dict):
-                                    for ck, cv in cat_inc["attributes"].items():
-                                        record[f"category_{ck}"] = cv
-
-                        # Permanently normalize all metric fields (scores.mean, scores.size, standardDeviation, difference, etc.) to float
-                        cls._normalize_metric_floats(record)
-
-                        # Enrich with meta attributes (e.g. meta_interval, meta_participation)
-                        if isinstance(meta_obj, dict):
-                            for mk, mv in meta_obj.items():
-                                if not isinstance(mv, (dict, list)):
-                                    record[f"meta_{mk}"] = mv
-
-                        # Delta date filtering
-                        rec_ts_str = (
-                            record.get("responseAnsweredAt")
-                            or record.get("updated_at")
-                            or record.get("updatedAt")
-                            or record.get("created_at")
-                            or record.get("createdAt")
-                            or record.get("employmentStart")
-                        )
-
-                        if not is_full_load and cutoff_dt and rec_ts_str:
-                            rec_dt = _parse_ts(rec_ts_str)
-                            if rec_dt and rec_dt < cutoff_dt:
-                                seg_filtered += 1
+                        for item in raw_items:
+                            if not isinstance(item, dict):
                                 continue
 
-                        if upper_bound_dt and rec_ts_str:
-                            rec_dt = _parse_ts(rec_ts_str)
-                            if rec_dt and rec_dt > upper_bound_dt:
-                                seg_filtered += 1
-                                continue
+                            attrs = item.get("attributes")
+                            rec_id = item.get("id") or f"{context_id}_{group_val or ''}_{table_name}".strip('_')
+                            record: Dict[str, Any] = {
+                                "id": rec_id,
+                                "type": item.get("type", table_name),
+                                "segment_id": raw_segment_id,
+                                "context_id": context_id,
+                            }
+                            if group_val:
+                                record["group"] = group_val
+                                record["category_group"] = group_val
 
-                        seg_records.append(record)
+                            if isinstance(attrs, dict):
+                                record.update(attrs)
+                            else:
+                                record.update(item)
+
+                            # Enrich with side-loaded JSON:API included resources (questions & categories)
+                            rels = item.get("relationships", {}) if isinstance(item, dict) else {}
+                            if isinstance(rels, dict):
+                                q_data = rels.get("question", {}).get("data")
+                                if isinstance(q_data, dict):
+                                    q_id = str(q_data.get("id", "")).strip()
+                                    record["question_id"] = q_id
+                                    q_inc = included_lookup.get(("question", q_id))
+                                    if q_inc and isinstance(q_inc.get("attributes"), dict):
+                                        for qk, qv in q_inc["attributes"].items():
+                                            record[f"question_{qk}"] = qv
+                                        q_rels = q_inc.get("relationships", {})
+                                        if isinstance(q_rels, dict):
+                                            cat_data = q_rels.get("category", {}).get("data")
+                                            if isinstance(cat_data, dict):
+                                                cat_id = str(cat_data.get("id", "")).strip()
+                                                record["category_id"] = cat_id
+                                                cat_inc = included_lookup.get(("category", cat_id))
+                                                if cat_inc and isinstance(cat_inc.get("attributes"), dict):
+                                                    for ck, cv in cat_inc["attributes"].items():
+                                                        record[f"category_{ck}"] = cv
+
+                                cat_data = rels.get("category", {}).get("data")
+                                if isinstance(cat_data, dict):
+                                    cat_id = str(cat_data.get("id", "")).strip()
+                                    record["category_id"] = cat_id
+                                    cat_inc = included_lookup.get(("category", cat_id))
+                                    if cat_inc and isinstance(cat_inc.get("attributes"), dict):
+                                        for ck, cv in cat_inc["attributes"].items():
+                                            record[f"category_{ck}"] = cv
+
+                            # Permanently normalize all metric fields (scores.mean, scores.size, standardDeviation, difference, etc.) to float
+                            cls._normalize_metric_floats(record)
+
+                            # Enrich with meta attributes (e.g. meta_interval, meta_participation)
+                            if isinstance(meta_obj, dict):
+                                for mk, mv in meta_obj.items():
+                                    if not isinstance(mv, (dict, list)):
+                                        record[f"meta_{mk}"] = mv
+
+                            # Delta date filtering
+                            rec_ts_str = (
+                                record.get("responseAnsweredAt")
+                                or record.get("updated_at")
+                                or record.get("updatedAt")
+                                or record.get("created_at")
+                                or record.get("createdAt")
+                                or record.get("employmentStart")
+                            )
+
+                            if not is_full_load and cutoff_dt and rec_ts_str:
+                                rec_dt = _parse_ts(rec_ts_str)
+                                if rec_dt and rec_dt < cutoff_dt:
+                                    seg_filtered += 1
+                                    continue
+
+                            if upper_bound_dt and rec_ts_str:
+                                rec_dt = _parse_ts(rec_ts_str)
+                                if rec_dt and rec_dt > upper_bound_dt:
+                                    seg_filtered += 1
+                                    continue
+
+                            seg_records.append(record)
 
                     # Follow cursor pagination if present
                     links = resp_data.get("links", {})
@@ -937,24 +999,22 @@ class PeakonConnector:
 
                 return seg_records, seg_filtered
 
-            # Concurrent task execution across all (segment, group) pairs
-            max_workers = int(config.get("max_workers") or config.get("parallel_workers") or 8)
-            max_workers = min(max(max_workers, 1), 16)
-            logger.info(
-                f"[Peakon/{table_name}] Fetching {len(tasks)} tasks concurrently with {max_workers} worker threads..."
-            )
+            # Task execution across all (segment, group) pairs
+            if records_from == "included":
+                max_workers = 1
+            else:
+                max_workers = int(config.get("max_workers") or config.get("parallel_workers") or 8)
+                max_workers = min(max(max_workers, 1), 16)
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_task = {
-                    executor.submit(_fetch_single_task, t): t
-                    for t in tasks
-                }
-                for done_idx, future in enumerate(as_completed(future_to_task), start=1):
-                    t_info = future_to_task[future]
+            if max_workers == 1:
+                logger.info(
+                    f"[Peakon/{table_name}] Fetching {len(tasks)} tasks sequentially (max_workers=1)..."
+                )
+                for done_idx, t in enumerate(tasks, start=1):
                     try:
-                        seg_records, seg_filtered = future.result()
+                        seg_records, seg_filtered = _fetch_single_task(t)
                     except Exception as task_err:
-                        logger.warning(f"[Peakon/{table_name}] Failed task {t_info}: {task_err}")
+                        logger.warning(f"[Peakon/{table_name}] Failed task {t}: {task_err}")
                         continue
 
                     total_filtered_out += seg_filtered
@@ -974,6 +1034,40 @@ class PeakonConnector:
                             f"[Peakon/{table_name}] Progress: [{done_idx}/{len(tasks)}] tasks completed "
                             f"({total_extracted} total records collected so far)."
                         )
+            else:
+                logger.info(
+                    f"[Peakon/{table_name}] Fetching {len(tasks)} tasks concurrently with {max_workers} worker threads..."
+                )
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_task = {
+                        executor.submit(_fetch_single_task, t): t
+                        for t in tasks
+                    }
+                    for done_idx, future in enumerate(as_completed(future_to_task), start=1):
+                        t_info = future_to_task[future]
+                        try:
+                            seg_records, seg_filtered = future.result()
+                        except Exception as task_err:
+                            logger.warning(f"[Peakon/{table_name}] Failed task {t_info}: {task_err}")
+                            continue
+
+                        total_filtered_out += seg_filtered
+                        total_extracted += len(seg_records)
+
+                        if on_chunk_callback:
+                            records_buffer.extend(seg_records)
+                            if len(records_buffer) >= s3_chunk_size:
+                                on_chunk_callback(records_buffer, part_number)
+                                part_number += 1
+                                records_buffer.clear()
+                        else:
+                            all_records.extend(seg_records)
+
+                        if done_idx % 25 == 0 or done_idx == len(tasks):
+                            logger.info(
+                                f"[Peakon/{table_name}] Progress: [{done_idx}/{len(tasks)}] tasks completed "
+                                f"({total_extracted} total records collected so far)."
+                            )
 
             if on_chunk_callback and records_buffer:
                 on_chunk_callback(records_buffer, part_number)
@@ -1030,70 +1124,74 @@ class PeakonConnector:
                     f"[Peakon/{table_name}] Expected dict response from API, got {type(resp_data)}."
                 )
 
-            if response_key not in resp_data:
-                raise KeyError(
-                    f"[Peakon/{table_name}] Response key '{response_key}' not found in API response. "
-                    f"Available top-level keys: {list(resp_data.keys())}."
-                )
+            if records_from == "included":
+                page_valid_records = build_lookup_records(resp_data, included_type, None, seen_ids)
+                raw_items = page_valid_records
+            else:
+                if response_key not in resp_data:
+                    raise KeyError(
+                        f"[Peakon/{table_name}] Response key '{response_key}' not found in API response. "
+                        f"Available top-level keys: {list(resp_data.keys())}."
+                    )
 
-            raw_items = resp_data[response_key]
-            if isinstance(raw_items, dict):
-                raw_items = [raw_items]
-            elif not isinstance(raw_items, list):
-                raw_items = []
+                raw_items = resp_data[response_key]
+                if isinstance(raw_items, dict):
+                    raw_items = [raw_items]
+                elif not isinstance(raw_items, list):
+                    raw_items = []
 
-            meta_obj = resp_data.get("meta", {})
+                meta_obj = resp_data.get("meta", {})
 
-            page_valid_records = []
-            for item in raw_items:
-                if not isinstance(item, dict):
-                    continue
-
-                attrs = item.get("attributes")
-                record: Dict[str, Any] = {
-                    "id": item.get("id"),
-                    "type": item.get("type", table_name),
-                }
-                if isinstance(attrs, dict):
-                    record.update(attrs)
-                else:
-                    record.update(item)
-
-                # Permanently normalize all metric fields to float
-                cls._normalize_metric_floats(record)
-
-                if isinstance(meta_obj, dict):
-                    for mk, mv in meta_obj.items():
-                        if not isinstance(mv, (dict, list)):
-                            record[f"meta_{mk}"] = mv
-
-                # If ingesting the segments table, record IDs for subsequent segment-dependent tables
-                if table_name.lower().endswith("segments") and item.get("id"):
-                    extracted_segment_ids.append(str(item["id"]).strip())
-
-                # Delta date filtering
-                rec_ts_str = (
-                    record.get("responseAnsweredAt")
-                    or record.get("updated_at")
-                    or record.get("updatedAt")
-                    or record.get("created_at")
-                    or record.get("createdAt")
-                    or record.get("employmentStart")
-                )
-
-                if not is_full_load and cutoff_dt and rec_ts_str:
-                    rec_dt = _parse_ts(rec_ts_str)
-                    if rec_dt and rec_dt < cutoff_dt:
-                        total_filtered_out += 1
+                page_valid_records = []
+                for item in raw_items:
+                    if not isinstance(item, dict):
                         continue
 
-                if upper_bound_dt and rec_ts_str:
-                    rec_dt = _parse_ts(rec_ts_str)
-                    if rec_dt and rec_dt > upper_bound_dt:
-                        total_filtered_out += 1
-                        continue
+                    attrs = item.get("attributes")
+                    record: Dict[str, Any] = {
+                        "id": item.get("id"),
+                        "type": item.get("type", table_name),
+                    }
+                    if isinstance(attrs, dict):
+                        record.update(attrs)
+                    else:
+                        record.update(item)
 
-                page_valid_records.append(record)
+                    # Permanently normalize all metric fields to float
+                    cls._normalize_metric_floats(record)
+
+                    if isinstance(meta_obj, dict):
+                        for mk, mv in meta_obj.items():
+                            if not isinstance(mv, (dict, list)):
+                                record[f"meta_{mk}"] = mv
+
+                    # If ingesting the segments table, record IDs for subsequent segment-dependent tables
+                    if table_name.lower().endswith("segments") and item.get("id"):
+                        extracted_segment_ids.append(str(item["id"]).strip())
+
+                    # Delta date filtering
+                    rec_ts_str = (
+                        record.get("responseAnsweredAt")
+                        or record.get("updated_at")
+                        or record.get("updatedAt")
+                        or record.get("created_at")
+                        or record.get("createdAt")
+                        or record.get("employmentStart")
+                    )
+
+                    if not is_full_load and cutoff_dt and rec_ts_str:
+                        rec_dt = _parse_ts(rec_ts_str)
+                        if rec_dt and rec_dt < cutoff_dt:
+                            total_filtered_out += 1
+                            continue
+
+                    if upper_bound_dt and rec_ts_str:
+                        rec_dt = _parse_ts(rec_ts_str)
+                        if rec_dt and rec_dt > upper_bound_dt:
+                            total_filtered_out += 1
+                            continue
+
+                    page_valid_records.append(record)
 
             total_extracted += len(page_valid_records)
             logger.info(
