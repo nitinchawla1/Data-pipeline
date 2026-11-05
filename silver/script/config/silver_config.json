@@ -521,6 +521,195 @@
           "custom_transform_script": ""
         }
       }
+    },
+    "peakon": {
+      "tables": {
+        "tbl_segments": {
+          "source_table_name": "raw_tbl_segments",
+          "nkey": "id",
+          "deduplication_keys": [
+            "id"
+          ],
+          "deduplication_order_by": [
+            "_ingested_at"
+          ],
+          "merge_strategy": "upsert",
+          "scd_type": "scd1",
+          "deduplication_strategy": "latest_by_order_column",
+          "column_renames": {},
+          "column_casts": {},
+          "exclude_columns": [],
+          "external_columns": [],
+          "filter_expression": "",
+          "custom_expressions": {},
+          "custom_transform_script": ""
+        },
+        "tbl_answers": {
+          "source_table_name": "raw_tbl_answers",
+          "nkey": "id",
+          "deduplication_keys": [
+            "id"
+          ],
+          "deduplication_order_by": [
+            "responseAnsweredAt",
+            "updated_at",
+            "_ingested_at"
+          ],
+          "merge_strategy": "upsert",
+          "scd_type": "scd1",
+          "deduplication_strategy": "latest_by_order_column",
+          "column_renames": {},
+          "column_casts": {},
+          "exclude_columns": [],
+          "external_columns": [],
+          "filter_expression": "",
+          "custom_expressions": {},
+          "custom_transform_script": ""
+        },
+        "tbl_employees": {
+          "source_table_name": "raw_tbl_employees",
+          "nkey": "id",
+          "deduplication_keys": [
+            "id"
+          ],
+          "deduplication_order_by": [
+            "updated_at",
+            "updatedAt",
+            "employmentStart",
+            "_ingested_at"
+          ],
+          "merge_strategy": "upsert",
+          "scd_type": "scd1",
+          "deduplication_strategy": "latest_by_order_column",
+          "column_renames": {},
+          "column_casts": {},
+          "exclude_columns": [],
+          "external_columns": [],
+          "filter_expression": "",
+          "custom_expressions": {},
+          "custom_transform_script": ""
+        },
+        "tbl_engagement_overview": {
+          "source_table_name": "raw_tbl_engagement_overview",
+          "nkey": "id",
+          "deduplication_keys": [
+            "id"
+          ],
+          "deduplication_order_by": [
+            "_ingested_at"
+          ],
+          "merge_strategy": "upsert",
+          "scd_type": "scd1",
+          "deduplication_strategy": "latest_by_order_column",
+          "column_renames": {},
+          "column_casts": {},
+          "exclude_columns": [],
+          "external_columns": [],
+          "filter_expression": "",
+          "custom_expressions": {},
+          "custom_transform_script": ""
+        },
+        "tbl_engagement_drivers": {
+          "source_table_name": "raw_tbl_engagement_drivers",
+          "nkey": "id",
+          "deduplication_keys": [
+            "id"
+          ],
+          "deduplication_order_by": [
+            "_ingested_at"
+          ],
+          "merge_strategy": "upsert",
+          "scd_type": "scd1",
+          "deduplication_strategy": "latest_by_order_column",
+          "column_renames": {},
+          "column_casts": {},
+          "exclude_columns": [],
+          "external_columns": [],
+          "filter_expression": "",
+          "custom_expressions": {},
+          "custom_transform_script": ""
+        },
+        "tbl_scores_by_category": {
+          "source_table_name": "raw_tbl_scores_by_category",
+          "nkey": "id",
+          "deduplication_keys": [
+            "id"
+          ],
+          "deduplication_order_by": [
+            "_ingested_at"
+          ],
+          "merge_strategy": "upsert",
+          "scd_type": "scd1",
+          "deduplication_strategy": "latest_by_order_column",
+          "column_renames": {},
+          "column_casts": {},
+          "exclude_columns": [],
+          "external_columns": [],
+          "filter_expression": "",
+          "custom_expressions": {},
+          "custom_transform_script": ""
+        },
+        "tbl_scores_by_question": {
+          "source_table_name": "raw_tbl_scores_by_question",
+          "nkey": "id",
+          "deduplication_keys": [
+            "id"
+          ],
+          "deduplication_order_by": [
+            "_ingested_at"
+          ],
+          "merge_strategy": "upsert",
+          "scd_type": "scd1",
+          "deduplication_strategy": "latest_by_order_column",
+          "column_renames": {},
+          "column_casts": {},
+          "exclude_columns": [],
+          "external_columns": [],
+          "filter_expression": "",
+          "custom_expressions": {},
+          "custom_transform_script": ""
+        },
+        "tbl_peakon_categories": {
+          "source_table_name": "raw_tbl_peakon_categories",
+          "nkey": "id",
+          "deduplication_keys": [
+            "id"
+          ],
+          "deduplication_order_by": [
+            "_ingested_at"
+          ],
+          "merge_strategy": "upsert",
+          "scd_type": "scd1",
+          "deduplication_strategy": "latest_by_order_column",
+          "column_renames": {},
+          "column_casts": {},
+          "exclude_columns": [],
+          "external_columns": [],
+          "filter_expression": "",
+          "custom_expressions": {},
+          "custom_transform_script": ""
+        },
+        "tbl_peakon_questions": {
+          "source_table_name": "raw_tbl_peakon_questions",
+          "nkey": "id",
+          "deduplication_keys": [
+            "id"
+          ],
+          "deduplication_order_by": [
+            "_ingested_at"
+          ],
+          "merge_strategy": "upsert",
+          "scd_type": "scd1",
+          "deduplication_strategy": "latest_by_order_column",
+          "column_renames": {},
+          "column_casts": {},
+          "exclude_columns": [],
+          "external_columns": [],
+          "filter_expression": "",
+          "custom_expressions": {},
+          "custom_transform_script": ""
+        }
+      }
     }
   }
 }
