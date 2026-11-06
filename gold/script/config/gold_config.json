@@ -169,6 +169,83 @@
           }
         }
       }
+    },
+    "peakon": {
+      "target_engines": [
+        "athena",
+        "aurora"
+      ],
+      "tables": {
+        "question_scores": {
+          "nkey": [
+            "segment_id",
+            "question_id",
+            "question_set"
+          ],
+          "incremental": true,
+          "initial_load": {
+            "path": "s3://{bucket}/gold/initial_exports/peakon/question_scores.csv",
+            "format": "csv",
+            "delimiter": ",",
+            "has_header": true
+          },
+          "custom_transform_script": "gold/script/custom_transforms/peakon_question_scores.py",
+          "aurora": {
+            "schema": "hr_gold",
+            "table_name": "peakon_question_scores"
+          }
+        },
+        "category_scores": {
+          "nkey": [
+            "segment_id",
+            "category_id",
+            "question_set"
+          ],
+          "incremental": true,
+          "initial_load": {
+            "path": "s3://{bucket}/gold/initial_exports/peakon/category_scores.csv",
+            "format": "csv",
+            "delimiter": ",",
+            "has_header": true
+          },
+          "aurora": {
+            "schema": "hr_gold",
+            "table_name": "peakon_category_scores"
+          }
+        },
+        "engagement_summary": {
+          "nkey": [
+            "context_id"
+          ],
+          "incremental": true,
+          "initial_load": {
+            "path": "s3://{bucket}/gold/initial_exports/peakon/engagement_summary.csv",
+            "format": "csv",
+            "delimiter": ",",
+            "has_header": true
+          },
+          "aurora": {
+            "schema": "hr_gold",
+            "table_name": "peakon_engagement_summary"
+          }
+        },
+        "survey_responses": {
+          "nkey": [
+            "answer_id"
+          ],
+          "incremental": true,
+          "initial_load": {
+            "path": "s3://{bucket}/gold/initial_exports/peakon/survey_responses.csv",
+            "format": "csv",
+            "delimiter": ",",
+            "has_header": true
+          },
+          "aurora": {
+            "schema": "hr_gold",
+            "table_name": "peakon_survey_responses"
+          }
+        }
+      }
     }
   }
 }
