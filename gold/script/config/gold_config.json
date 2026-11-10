@@ -244,6 +244,40 @@
             "schema": "hr_gold",
             "table_name": "peakon_survey_responses"
           }
+        },
+                "segments": {
+          "nkey": [
+            "segment_id"
+          ],
+          "incremental": true,
+          "initial_load": {
+            "path": "s3://{bucket}/gold/initial_exports/peakon/segments.csv",
+            "format": "csv",
+            "delimiter": ",",
+            "has_header": true
+          },
+          "custom_transform_script": "gold/script/custom_transforms/peakon_segments.py",
+          "aurora": {
+            "schema": "hr_gold",
+            "table_name": "peakon_segments"
+          }
+        },
+        "employees": {
+          "nkey": [
+            "employee_id"
+          ],
+          "incremental": true,
+          "initial_load": {
+            "path": "s3://{bucket}/gold/initial_exports/peakon/employees.csv",
+            "format": "csv",
+            "delimiter": ",",
+            "has_header": true
+          },
+          "custom_transform_script": "gold/script/custom_transforms/peakon_employees.py",
+          "aurora": {
+            "schema": "hr_gold",
+            "table_name": "peakon_employees"
+          }
         }
       }
     }
