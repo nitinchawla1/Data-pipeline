@@ -86,7 +86,8 @@ def build_lookup_records(
         attrs = inc.get("attributes")
         if isinstance(attrs, dict):
             record.update(attrs)
-       # Keep relationship IDs (e.g. question -> category, employee -> attribute/manager)
+
+        # Keep relationship IDs (e.g. question -> category, employee -> attribute/manager)
         rels = inc.get("relationships") or {}
         if isinstance(rels, dict):
             for rel_name, rel in rels.items():
@@ -100,7 +101,6 @@ def build_lookup_records(
                         record[f"rel_{rel_name}_type"] = data[0].get("type")
 
         # A question links to its category: keep that id so Gold can join question -> category
-        rels = inc.get("relationships") or {}
         cat = (rels.get("category") or {}).get("data") if isinstance(rels, dict) else None
         if isinstance(cat, dict) and cat.get("id") is not None:
             record["category_id"] = str(cat["id"]).strip()
@@ -941,8 +941,20 @@ class PeakonConnector:
                             else:
                                 record.update(item)
 
-                            # Enrich with side-loaded JSON:API included resources (questions & categories)
+                            # Keep relationship IDs (e.g. employee -> attribute, employee -> manager, segment -> attribute)
                             rels = item.get("relationships", {}) if isinstance(item, dict) else {}
+                            if isinstance(rels, dict):
+                                for rel_name, rel in rels.items():
+                                    data = (rel or {}).get("data") if isinstance(rel, dict) else None
+                                    if isinstance(data, dict):
+                                        record[f"rel_{rel_name}_id"] = data.get("id")
+                                        record[f"rel_{rel_name}_type"] = data.get("type")
+                                    elif isinstance(data, list) and data:
+                                        record[f"rel_{rel_name}_ids"] = json.dumps([d.get("id") for d in data if isinstance(d, dict)])
+                                        if isinstance(data[0], dict):
+                                            record[f"rel_{rel_name}_type"] = data[0].get("type")
+
+                            # Enrich with side-loaded JSON:API included resources (questions & categories)
                             if isinstance(rels, dict):
                                 q_data = rels.get("question", {}).get("data")
                                 if isinstance(q_data, dict):
@@ -1168,6 +1180,24 @@ class PeakonConnector:
                         record.update(attrs)
                     else:
                         record.update(item)
+
+                    # Keep relationship IDs (e.g. employee -> attribute/manager, segment -> attribute)
+                    rels = item.get("relationships")
+                    if isinstance(rels, dict):
+                        for rel_name, rel in rels.items():
+                            data = (rel or {}).get("data") if isinstance(rel, dict) else None
+                            if isinstance(data, dict):
+                                record[f"rel_{rel_name}_id"] = data.get("id")
+                                record[f"rel_{rel_name}_type"] = data.get("type")
+                            elif isinstance(data, list) and data:
+                                record[f"rel_{rel_name}_ids"] = json.dumps([d.get("id") for d in data if isinstance(d, dict)])
+                                if isinstance(data[0], dict):
+                                    record[f"rel_{rel_name}_type"] = data[0].get("type")
+
+                    # Lists and nested sections as JSON text, so flattening cannot split rows or clash on types
+                    for k, v in list(record.items()):
+                        if isinstance(v, (list, dict)):
+                            record[k] = json.dumps(v)
 
                     # Permanently normalize all metric fields to float
                     cls._normalize_metric_floats(record)
