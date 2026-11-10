@@ -6,10 +6,10 @@ Signature: transform(df, spark=None, context=None) -> DataFrame
 
 Developer Notes:
 - Enforces Enterprise Security, Compliance, and Row-Level Security (RLS) standards.
-- Sensitive demographic attributes (e.g. Age, Gender, Date of Birth, Ethnicity, Race,
-  Salary, Disability, Sexual Orientation) are strictly stripped to prevent PII exposure in BI/reporting.
+- Sensitive demographic attributes (Age, Gender, Date of Birth, Race and Ethnicity,
+  Veteran Status, Pay Type, RIF flags) are strictly stripped to prevent PII exposure in BI/reporting.
 - Resolves key organizational hierarchy fields (Workday ID, Cost Center, Supervisory Org,
-  Manager Relationship, Attribute IDs) required by security filter policies.
+  Manager Email, Job Profile, Office/Location) required by security filter policies.
 """
 
 import logging
@@ -29,11 +29,14 @@ SENSITIVE_PII_PATTERNS = [
     r"date_?of_?birth",
     r"^dob$",
     r"birth_?date",
+    r"race.*ethnicity",
     r"^ethnicity$",
     r"^race$",
+    r"veteran.*status",
     r"^salary$",
     r"^compensation$",
-    r"^pay_",
+    r"pay_?type",
+    r"is_?rif",
     r"^ssn$",
     r"social_?security",
     r"disability",
@@ -83,13 +86,19 @@ def transform(
     # 2. Ensure security & RLS columns are always present with valid types
     expected_security_columns = {
         "workday_id": "string",
-        "cost_center": "string",
-        "supervisory_organization": "string",
-        "manager_id": "string",
-        "attribute_ids": "string",
-        "attribute_type": "string",
+        "manager_email": "string",
+        "cost_center_id": "string",
+        "cost_center_name": "string",
+        "supervisory_org_name": "string",
+        "supervisory_org_level_3": "string",
+        "supervisory_org_level_4": "string",
         "department": "string",
-        "location": "string",
+        "job_title": "string",
+        "job_profile": "string",
+        "office": "string",
+        "work_city": "string",
+        "work_country": "string",
+        "employment_status": "string",
     }
     for col_name, col_type in expected_security_columns.items():
         if col_name not in df.columns:
@@ -101,4 +110,3 @@ def transform(
         return df
 
     return df
-
