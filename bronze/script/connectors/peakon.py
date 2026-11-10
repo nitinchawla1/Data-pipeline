@@ -86,6 +86,18 @@ def build_lookup_records(
         attrs = inc.get("attributes")
         if isinstance(attrs, dict):
             record.update(attrs)
+       # Keep relationship IDs (e.g. question -> category, employee -> attribute/manager)
+        rels = inc.get("relationships") or {}
+        if isinstance(rels, dict):
+            for rel_name, rel in rels.items():
+                data = (rel or {}).get("data") if isinstance(rel, dict) else None
+                if isinstance(data, dict):
+                    record[f"rel_{rel_name}_id"] = data.get("id")
+                    record[f"rel_{rel_name}_type"] = data.get("type")
+                elif isinstance(data, list) and data:
+                    record[f"rel_{rel_name}_ids"] = json.dumps([d.get("id") for d in data if isinstance(d, dict)])
+                    if isinstance(data[0], dict):
+                        record[f"rel_{rel_name}_type"] = data[0].get("type")
 
         # A question links to its category: keep that id so Gold can join question -> category
         rels = inc.get("relationships") or {}
