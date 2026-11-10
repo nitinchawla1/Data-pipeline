@@ -5,8 +5,8 @@ Pattern: gold/script/custom_transforms/<source>_<table>.py
 Signature: transform(df, spark=None, context=None) -> DataFrame
 
 Developer Notes:
-- Curates Peakon Segments and their relationship links to attributes for Row-Level Security (RLS).
-- Preserves all incoming segment metadata and relationship attributes.
+- Curates Peakon Segments and their attributes for Row-Level Security (RLS) and reporting.
+- Preserves all incoming segment metadata and benchmark configurations.
 """
 
 import logging
@@ -40,11 +40,14 @@ def transform(
     ctx = context or {}
     is_initial_load = ctx.get("is_initial_load", False)
 
-    # Ensure key RLS relationship attributes are present
+    # Ensure key RLS relationship and lookup attributes are present
     expected_cols = {
-        "attribute_id": "string",
-        "attribute_type": "string",
-        "description": "string",
+        "identifier": "string",
+        "standard": "string",
+        "context_id": "string",
+        "benchmark_type": "string",
+        "benchmark_id": "string",
+        "abbreviation": "string",
     }
     for col_name, col_type in expected_cols.items():
         if col_name not in df.columns:
@@ -55,4 +58,3 @@ def transform(
         return df
 
     return df
-
