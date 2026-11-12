@@ -280,6 +280,97 @@
           }
         }
       }
-    }
+    },
+        "workday": {
+      "target_engines": [
+        "athena",
+        "aurora"
+      ],
+      "tables": {
+        "trended_workforce": {
+          "nkey": [
+            "worker_id",
+            "snapshot_date"
+          ],
+          "incremental": true,
+          "initial_load": {
+            "path": "s3://{bucket}/gold/initial_exports/workday/trended_workforce.csv",
+            "format": "csv",
+            "delimiter": ",",
+            "has_header": true
+          },
+          "custom_transform_script": "gold/script/custom_transforms/workday_trended_workforce.py",
+          "aurora": {
+            "schema": "hr_gold",
+            "table_name": "workday_trended_workforce"
+          }
+        },
+        "trended_workforce_bp_reason": {
+          "nkey": [
+            "worker_id",
+            "event_id"
+          ],
+          "incremental": true,
+          "initial_load": {
+            "path": "s3://{bucket}/gold/initial_exports/workday/trended_workforce_bp_reason.csv",
+            "format": "csv",
+            "delimiter": ",",
+            "has_header": true
+          },
+          "aurora": {
+            "schema": "hr_gold",
+            "table_name": "workday_trended_workforce_bp_reason"
+          }
+        },
+        "cost_center_lookup": {
+          "nkey": [
+            "cost_center_id"
+          ],
+          "incremental": true,
+          "initial_load": {
+            "path": "s3://{bucket}/gold/initial_exports/workday/cost_center_lookup.csv",
+            "format": "csv",
+            "delimiter": ",",
+            "has_header": true
+          },
+          "aurora": {
+            "schema": "hr_gold",
+            "table_name": "workday_cost_center_lookup"
+          }
+        },
+        "positions_awaiting_approval": {
+          "nkey": [
+            "position_id",
+            "requisition_id"
+          ],
+          "incremental": true,
+          "initial_load": {
+            "path": "s3://{bucket}/gold/initial_exports/workday/positions_awaiting_approval.csv",
+            "format": "csv",
+            "delimiter": ",",
+            "has_header": true
+          },
+          "aurora": {
+            "schema": "hr_gold",
+            "table_name": "workday_positions_awaiting_approval"
+          }
+        },
+        "positions_status": {
+          "nkey": [
+            "position_id"
+          ],
+          "incremental": true,
+          "initial_load": {
+            "path": "s3://{bucket}/gold/initial_exports/workday/positions_status.csv",
+            "format": "csv",
+            "delimiter": ",",
+            "has_header": true
+          },
+          "aurora": {
+            "schema": "hr_gold",
+            "table_name": "workday_positions_status"
+          }
+        }
+      }
   }
 }
