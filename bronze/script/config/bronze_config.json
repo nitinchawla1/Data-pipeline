@@ -348,13 +348,20 @@
       "api_endpoint_template": "/api/v1/{table_name}",
       "response_records_key": "data",
       "batch_size": 2000,
+      "segment_limit": 50,
+      "_note_segment_limit": "Limits contextual endpoints to first 50 segments for testing. Set to 0 or null for full extraction across all segments.",
       "default_query": "interval=quarter&observations=true&participation=true",
       "tables": {
         "segments": {
           "custom_endpoint": "/api/v1/segments?filter[attributeId]=4189",
           "endpoint": "/api/v1/segments?filter[attributeId]=4189",
           "initial_load_date": "1900-01-01 00:00:00",
-          "upper_bound": ""
+          "upper_bound": "",
+          "encryption_columns": {
+            "name": "EMP_MEMBERNAME_ALPHANUM_LP",
+            "nametranslated": "EMP_MEMBERNAME_ALPHANUM_LP",
+            "abbreviation": "EMP_MEMBERNAME_ALPHANUM_LP"
+          }
         },
         "answers": {
           "custom_endpoint": "/api/v1/answers/export",
@@ -366,7 +373,59 @@
           "custom_endpoint": "/api/v1/employees",
           "endpoint": "/api/v1/employees",
           "initial_load_date": "1900-01-01 00:00:00",
-          "upper_bound": ""
+          "upper_bound": "",
+          "encryption_columns": {
+            "firstname": "EMP_MEMBERNAME_ALPHANUM_LP",
+            "lastname": "EMP_MEMBERNAME_ALPHANUM_LP",
+            "name": "EMP_MEMBERNAME_ALPHANUM_LP",
+            "date of birth": "DATE_YYYYMMDD",
+            "gender": "AES256",
+            "age": "AES256",
+            "supervisory_org_name": {
+              "data_element": "EMP_MEMBERNAME_ALPHANUM_LP",
+              "bracket_only": true
+            },
+            "supervisoryorgfromtop3": {
+              "data_element": "EMP_MEMBERNAME_ALPHANUM_LP",
+              "bracket_only": true
+            },
+            "supervisoryorgfromtop4": {
+              "data_element": "EMP_MEMBERNAME_ALPHANUM_LP",
+              "bracket_only": true
+            },
+            "supervisoryorgfromtop5": {
+              "data_element": "EMP_MEMBERNAME_ALPHANUM_LP",
+              "bracket_only": true
+            },
+            "supervisoryorgfromtop6": {
+              "data_element": "EMP_MEMBERNAME_ALPHANUM_LP",
+              "bracket_only": true
+            },
+            "supervisoryorgfromtop7": {
+              "data_element": "EMP_MEMBERNAME_ALPHANUM_LP",
+              "bracket_only": true
+            },
+            "supervisoryorgfromtop8": {
+              "data_element": "EMP_MEMBERNAME_ALPHANUM_LP",
+              "bracket_only": true
+            },
+            "supervisoryorgfromtop9": {
+              "data_element": "EMP_MEMBERNAME_ALPHANUM_LP",
+              "bracket_only": true
+            },
+            "supervisoryorgfromtop10": {
+              "data_element": "EMP_MEMBERNAME_ALPHANUM_LP",
+              "bracket_only": true
+            },
+            "supervisoryorgfromtop11": {
+              "data_element": "EMP_MEMBERNAME_ALPHANUM_LP",
+              "bracket_only": true
+            },
+            "supervisoryorgfromtop12": {
+              "data_element": "EMP_MEMBERNAME_ALPHANUM_LP",
+              "bracket_only": true
+            }
+          }
         },
         "engagement_overview": {
           "custom_endpoint": "/api/v1/engagement/contexts/{context_id}/overview",
@@ -446,7 +505,7 @@
           "included_type": "questions",
           "initial_load_date": "1900-01-01 00:00:00",
           "upper_bound": ""
-        }        
+        }
       }
     }
   }
