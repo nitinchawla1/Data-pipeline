@@ -158,22 +158,29 @@ class ProtegrityEncryptionManager:
                 if c_name:
                     normalized[c_name] = {
                         "data_element": self.default_data_element,
-                        "encoding": self.default_encoding
+                        "encoding": self.default_encoding,
+                        "bracket_only": "supervisory" in c_name
                     }
         elif isinstance(columns_cfg, dict):
             for col, val in columns_cfg.items():
                 c_name = str(col).strip().lower()
                 if not c_name:
                     continue
+                is_bracket = "supervisory" in c_name
                 if isinstance(val, str):
                     normalized[c_name] = {
                         "data_element": val.strip(),
-                        "encoding": self.default_encoding
+                        "encoding": self.default_encoding,
+                        "bracket_only": is_bracket
                     }
                 elif isinstance(val, dict):
+                    cfg_bracket = val.get("bracket_only")
+                    if cfg_bracket is not None:
+                        is_bracket = bool(cfg_bracket)
                     normalized[c_name] = {
                         "data_element": str(val.get("data_element", self.default_data_element)).strip(),
-                        "encoding": str(val.get("encoding", self.default_encoding)).strip()
+                        "encoding": str(val.get("encoding", self.default_encoding)).strip(),
+                        "bracket_only": is_bracket
                     }
         return normalized
 
@@ -319,20 +326,37 @@ class ProtegrityEncryptionManager:
             tracking_map: Dict[str, List[Tuple[int, str]]] = {}
 
             # Build argument for each configured column
+            BRACKET_REGEX = re.compile(r"^(.*?)\s*\((.*?)\)\s*$")
+
             for col_name, meta in target_cols.items():
                 data_values = []
                 row_positions = []
+                is_bracket_col = meta.get("bracket_only", False)
+                clean_target = self._clean_key(col_name)
 
                 for row_offset, rec in enumerate(slice_records):
                     if not isinstance(rec, dict):
                         continue
-                    # Case-insensitive column key matching
-                    found_key = next((k for k in rec.keys() if k.lower() == col_name), None)
+                    # Space/underscore and case-resilient column key matching
+                    found_key = next((k for k in rec.keys() if self._clean_key(k) == clean_target or k.lower() == col_name), None)
                     if found_key:
                         val = rec.get(found_key)
-                        if val is not None and str(val).strip() != "":
-                            data_values.append(str(val))
-                            row_positions.append((start_idx + row_offset, found_key))
+                        if val is not None and str(val).strip() != "" and str(val).lower() not in ("nan", "none", "null"):
+                            raw_str = str(val).strip()
+                            match = BRACKET_REGEX.match(raw_str)
+                            if match:
+                                prefix = f"{match.group(1).strip()} ("
+                                name_to_encrypt = match.group(2).strip()
+                                suffix = ")"
+                                if name_to_encrypt:
+                                    data_values.append(name_to_encrypt)
+                                    row_positions.append((start_idx + row_offset, found_key, prefix, suffix))
+                            else:
+                                if is_bracket_col:
+                                    # Supervisory / bracket-only column without brackets: keep org name untouched
+                                    continue
+                                data_values.append(raw_str)
+                                row_positions.append((start_idx + row_offset, found_key, "", ""))
 
                 if data_values:
                     arg_id = f"protect_{col_name}"
@@ -351,7 +375,7 @@ class ProtegrityEncryptionManager:
             # Invoke Protegrity Lambda for this 500-record slice
             resp = self._invoke_protector_lambda(action=action, arguments=arguments)
 
-            # Replace original plaintext values with returned tokens
+            # Replace original plaintext values with returned tokens (and re-combine if bracketed)
             results_list = resp.get("results", [])
             for res_block in results_list:
                 arg_id = res_block.get("id")
@@ -364,8 +388,11 @@ class ProtegrityEncryptionManager:
                         f"Expected {len(positions)} tokens, received {len(tokens)}."
                     )
 
-                for (target_idx, target_key), token in zip(positions, tokens):
-                    records[target_idx][target_key] = token
+                for (target_idx, target_key, prefix, suffix), token in zip(positions, tokens):
+                    if prefix or suffix:
+                        records[target_idx][target_key] = f"{prefix}{token}{suffix}"
+                    else:
+                        records[target_idx][target_key] = token
 
         return records
 
@@ -504,21 +531,36 @@ class ProtegrityEncryptionManager:
                 records = pdf.to_dict(orient="records")
                 total_rows = len(records)
 
+                BRACKET_REGEX = re.compile(r"^(.*?)\s*\((.*?)\)\s*$")
+
                 # Process partition in slices of batch_size (e.g. 500 records)
                 for start_idx in range(0, total_rows, b_size):
                     end_idx = min(start_idx + b_size, total_rows)
                     slice_records = records[start_idx:end_idx]
 
                     arguments = []
-                    pos_map: Dict[str, List[Tuple[int, str]]] = {}
+                    pos_map: Dict[str, List[Tuple[int, str, str, str]]] = {}
 
                     for actual_col_name, meta in active_target_cols.items():
                         vals, pos = [], []
+                        is_bracket_col = meta.get("bracket_only", False)
                         for offset, r in enumerate(slice_records):
                             val = r.get(actual_col_name)
                             if val is not None and str(val).strip() != "" and str(val).lower() not in ("nan", "none", "null"):
-                                vals.append(str(val))
-                                pos.append((start_idx + offset, actual_col_name))
+                                raw_str = str(val).strip()
+                                match = BRACKET_REGEX.match(raw_str)
+                                if match:
+                                    prefix = f"{match.group(1).strip()} ("
+                                    name_to_encrypt = match.group(2).strip()
+                                    suffix = ")"
+                                    if name_to_encrypt:
+                                        vals.append(name_to_encrypt)
+                                        pos.append((start_idx + offset, actual_col_name, prefix, suffix))
+                                else:
+                                    if is_bracket_col:
+                                        continue
+                                    vals.append(raw_str)
+                                    pos.append((start_idx + offset, actual_col_name, "", ""))
 
                         if vals:
                             aid = f"protect_{actual_col_name}"
@@ -540,8 +582,11 @@ class ProtegrityEncryptionManager:
                         tokens = res_block.get("results", [])
                         positions = pos_map.get(aid, [])
                         if len(tokens) == len(positions):
-                            for (target_idx, target_col), tkn in zip(positions, tokens):
-                                records[target_idx][target_col] = tkn
+                            for (target_idx, target_col, prefix, suffix), tkn in zip(positions, tokens):
+                                if prefix or suffix:
+                                    records[target_idx][target_col] = f"{prefix}{tkn}{suffix}"
+                                else:
+                                    records[target_idx][target_col] = tkn
                         else:
                             logger.warning(
                                 f"[Protegrity] Token count mismatch for '{aid}': expected {len(positions)}, got {len(tokens)}"
