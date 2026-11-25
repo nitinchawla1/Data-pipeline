@@ -66,6 +66,18 @@ def _parse_ts(ts_val: Any) -> Optional[datetime]:
         return None
 
 
+def _clean_peakon_key(key: Any) -> str:
+    """
+    Normalizes Peakon attribute/column names to match AWS Glue Catalog (snake_case, lowercase).
+    Converts spaces and hyphens to underscores and strips whitespace.
+    Leaves single-word and camelCase identifiers untouched if they contain no spaces or hyphens.
+    """
+    k_str = str(key).strip()
+    if " " in k_str or "-" in k_str:
+        return k_str.lower().replace(" ", "_").replace("-", "_")
+    return k_str
+
+
 def build_lookup_records(
     resp_data: Dict[str, Any],
     included_type: str,
@@ -85,7 +97,9 @@ def build_lookup_records(
         record: Dict[str, Any] = {"id": rec_id, "type": included_type, "called_for_group": group}
         attrs = inc.get("attributes")
         if isinstance(attrs, dict):
-            record.update(attrs)
+            record.update({_clean_peakon_key(k): v for k, v in attrs.items()})
+        elif isinstance(inc, dict):
+            record.update({_clean_peakon_key(k): v for k, v in inc.items()})
 
         # Keep relationship IDs (e.g. question -> category, employee -> attribute/manager)
         rels = inc.get("relationships") or {}
@@ -591,8 +605,10 @@ class PeakonConnector:
 
         logger.info(f"Fetching segment IDs directly from Peakon API: {curr_url}...")
         api_segment_ids: List[str] = []
-        # Check segment limit for discovery
-        seg_limit_val = source_config.get("segment_limit", 50)
+        # Check segment limit for discovery (supports segment_limit and max_segments)
+        seg_limit_val = source_config.get("segment_limit")
+        if seg_limit_val is None:
+            seg_limit_val = source_config.get("max_segments", 50)
         try:
             discovery_limit = int(seg_limit_val) if seg_limit_val is not None else 50
         except (ValueError, TypeError):
@@ -768,10 +784,15 @@ class PeakonConnector:
                     )
                     return []
 
-                # Segment limit for testing / staging (defaults to 50, set to 0 or null in bronze_config.json for full run)
-                seg_limit_raw = table_cfg.get("segment_limit")
+                # Segment limit and start_with for testing / staging
+                start_with_val = table_cfg.get("start_with") or config.get("start_with")
+                if start_with_val:
+                    sw_list = [str(s).strip() for s in (start_with_val if isinstance(start_with_val, list) else [start_with_val]) if str(s).strip()]
+                    segment_ids = sw_list + [s for s in segment_ids if s not in sw_list]
+
+                seg_limit_raw = table_cfg.get("segment_limit") or table_cfg.get("max_segments")
                 if seg_limit_raw is None:
-                    seg_limit_raw = config.get("segment_limit", 50)
+                    seg_limit_raw = config.get("segment_limit") or config.get("max_segments", 50)
                 try:
                     segment_limit = int(seg_limit_raw) if seg_limit_raw is not None else 50
                 except (ValueError, TypeError):
@@ -937,9 +958,9 @@ class PeakonConnector:
                                 record["category_group"] = group_val
 
                             if isinstance(attrs, dict):
-                                record.update(attrs)
-                            else:
-                                record.update(item)
+                                record.update({_clean_peakon_key(k): v for k, v in attrs.items()})
+                            elif isinstance(item, dict):
+                                record.update({_clean_peakon_key(k): v for k, v in item.items()})
 
                             # Keep relationship IDs (e.g. employee -> attribute, employee -> manager, segment -> attribute)
                             rels = item.get("relationships", {}) if isinstance(item, dict) else {}
@@ -963,7 +984,7 @@ class PeakonConnector:
                                     q_inc = included_lookup.get(("question", q_id))
                                     if q_inc and isinstance(q_inc.get("attributes"), dict):
                                         for qk, qv in q_inc["attributes"].items():
-                                            record[f"question_{qk}"] = qv
+                                            record[f"question_{_clean_peakon_key(qk)}"] = qv
                                         q_rels = q_inc.get("relationships", {})
                                         if isinstance(q_rels, dict):
                                             cat_data = q_rels.get("category", {}).get("data")
@@ -973,7 +994,7 @@ class PeakonConnector:
                                                 cat_inc = included_lookup.get(("category", cat_id))
                                                 if cat_inc and isinstance(cat_inc.get("attributes"), dict):
                                                     for ck, cv in cat_inc["attributes"].items():
-                                                        record[f"category_{ck}"] = cv
+                                                        record[f"category_{_clean_peakon_key(ck)}"] = cv
 
                                 cat_data = rels.get("category", {}).get("data")
                                 if isinstance(cat_data, dict):
@@ -982,7 +1003,7 @@ class PeakonConnector:
                                     cat_inc = included_lookup.get(("category", cat_id))
                                     if cat_inc and isinstance(cat_inc.get("attributes"), dict):
                                         for ck, cv in cat_inc["attributes"].items():
-                                            record[f"category_{ck}"] = cv
+                                            record[f"category_{_clean_peakon_key(ck)}"] = cv
 
                             # Permanently normalize all metric fields (scores.mean, scores.size, standardDeviation, difference, etc.) to float
                             cls._normalize_metric_floats(record)
@@ -1177,9 +1198,9 @@ class PeakonConnector:
                         "type": item.get("type", table_name),
                     }
                     if isinstance(attrs, dict):
-                        record.update(attrs)
-                    else:
-                        record.update(item)
+                        record.update({_clean_peakon_key(k): v for k, v in attrs.items()})
+                    elif isinstance(item, dict):
+                        record.update({_clean_peakon_key(k): v for k, v in item.items()})
 
                     # Keep relationship IDs (e.g. employee -> attribute/manager, segment -> attribute)
                     rels = item.get("relationships")
@@ -1214,11 +1235,16 @@ class PeakonConnector:
                     # Delta date filtering
                     rec_ts_str = (
                         record.get("responseAnsweredAt")
+                        or record.get("responseansweredat")
                         or record.get("updated_at")
                         or record.get("updatedAt")
+                        or record.get("updatedat")
                         or record.get("created_at")
                         or record.get("createdAt")
+                        or record.get("createdat")
                         or record.get("employmentStart")
+                        or record.get("employmentstart")
+                        or record.get("employment_start")
                     )
 
                     if not is_full_load and cutoff_dt and rec_ts_str:
