@@ -606,14 +606,14 @@ class PeakonConnector:
 
         logger.info(f"Fetching segment IDs directly from Peakon API: {curr_url}...")
         api_segment_ids: List[str] = []
-        # Check segment limit for discovery (supports segment_limit and max_segments)
+        # Check segment limit for discovery (supports segment_limit and max_segments; 0 or None = unlimited)
         seg_limit_val = source_config.get("segment_limit")
         if seg_limit_val is None:
-            seg_limit_val = source_config.get("max_segments", 50)
+            seg_limit_val = source_config.get("max_segments")
         try:
-            discovery_limit = int(seg_limit_val) if seg_limit_val is not None else 50
+            discovery_limit = int(seg_limit_val) if seg_limit_val is not None else 0
         except (ValueError, TypeError):
-            discovery_limit = 50
+            discovery_limit = 0
 
         try:
             while curr_url:
@@ -791,17 +791,23 @@ class PeakonConnector:
                     sw_list = [str(s).strip() for s in (start_with_val if isinstance(start_with_val, list) else [start_with_val]) if str(s).strip()]
                     segment_ids = sw_list + [s for s in segment_ids if s not in sw_list]
 
-                seg_limit_raw = table_cfg.get("segment_limit") or table_cfg.get("max_segments")
+                # Resolve segment limit: table config > source config > default (0 or None = unlimited)
+                seg_limit_raw = table_cfg.get("segment_limit")
                 if seg_limit_raw is None:
-                    seg_limit_raw = config.get("segment_limit") or config.get("max_segments", 50)
+                    seg_limit_raw = table_cfg.get("max_segments")
+                if seg_limit_raw is None:
+                    seg_limit_raw = config.get("segment_limit")
+                if seg_limit_raw is None:
+                    seg_limit_raw = config.get("max_segments")
+
                 try:
-                    segment_limit = int(seg_limit_raw) if seg_limit_raw is not None else 50
+                    segment_limit = int(seg_limit_raw) if seg_limit_raw is not None else 0
                 except (ValueError, TypeError):
-                    segment_limit = 50
+                    segment_limit = 0
 
                 if segment_limit > 0 and len(segment_ids) > segment_limit:
                     logger.info(
-                        f"[Peakon/{table_name}] Test limit active: Limiting from {len(segment_ids)} segments down to first {segment_limit} segments."
+                        f"[Peakon/{table_name}] Limit active: Limiting from {len(segment_ids)} segments down to first {segment_limit} segments."
                     )
                     segment_ids = segment_ids[:segment_limit]
 
