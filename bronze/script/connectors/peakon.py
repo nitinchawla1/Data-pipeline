@@ -105,14 +105,15 @@ def build_lookup_records(
         rels = inc.get("relationships") or {}
         if isinstance(rels, dict):
             for rel_name, rel in rels.items():
+                clean_rel = _clean_peakon_key(rel_name)
                 data = (rel or {}).get("data") if isinstance(rel, dict) else None
                 if isinstance(data, dict):
-                    record[f"rel_{rel_name}_id"] = data.get("id")
-                    record[f"rel_{rel_name}_type"] = data.get("type")
+                    record[f"rel_{clean_rel}_id"] = data.get("id")
+                    record[f"rel_{clean_rel}_type"] = data.get("type")
                 elif isinstance(data, list) and data:
-                    record[f"rel_{rel_name}_ids"] = json.dumps([d.get("id") for d in data if isinstance(d, dict)])
+                    record[f"rel_{clean_rel}_ids"] = json.dumps([d.get("id") for d in data if isinstance(d, dict)])
                     if isinstance(data[0], dict):
-                        record[f"rel_{rel_name}_type"] = data[0].get("type")
+                        record[f"rel_{clean_rel}_type"] = data[0].get("type")
 
         # A question links to its category: keep that id so Gold can join question -> category
         cat = (rels.get("category") or {}).get("data") if isinstance(rels, dict) else None
@@ -123,7 +124,7 @@ def build_lookup_records(
         for k, v in list(record.items()):
             if isinstance(v, (list, dict)):
                 record[k] = json.dumps(v)
-        records.append(record)
+        records.append({_clean_peakon_key(k): v for k, v in record.items()})
     return records
 
 
@@ -966,14 +967,15 @@ class PeakonConnector:
                             rels = item.get("relationships", {}) if isinstance(item, dict) else {}
                             if isinstance(rels, dict):
                                 for rel_name, rel in rels.items():
+                                    clean_rel = _clean_peakon_key(rel_name)
                                     data = (rel or {}).get("data") if isinstance(rel, dict) else None
                                     if isinstance(data, dict):
-                                        record[f"rel_{rel_name}_id"] = data.get("id")
-                                        record[f"rel_{rel_name}_type"] = data.get("type")
+                                        record[f"rel_{clean_rel}_id"] = data.get("id")
+                                        record[f"rel_{clean_rel}_type"] = data.get("type")
                                     elif isinstance(data, list) and data:
-                                        record[f"rel_{rel_name}_ids"] = json.dumps([d.get("id") for d in data if isinstance(d, dict)])
+                                        record[f"rel_{clean_rel}_ids"] = json.dumps([d.get("id") for d in data if isinstance(d, dict)])
                                         if isinstance(data[0], dict):
-                                            record[f"rel_{rel_name}_type"] = data[0].get("type")
+                                            record[f"rel_{clean_rel}_type"] = data[0].get("type")
 
                             # Enrich with side-loaded JSON:API included resources (questions & categories)
                             if isinstance(rels, dict):
@@ -1012,7 +1014,8 @@ class PeakonConnector:
                             if isinstance(meta_obj, dict):
                                 for mk, mv in meta_obj.items():
                                     if not isinstance(mv, (dict, list)):
-                                        record[f"meta_{mk}"] = mv
+                                        clean_mk = _clean_peakon_key(mk)
+                                        record[f"meta_{clean_mk}"] = mv
 
                             # Delta date filtering
                             rec_ts_str = (
@@ -1036,7 +1039,8 @@ class PeakonConnector:
                                     seg_filtered += 1
                                     continue
 
-                            seg_records.append(record)
+                            clean_record = {_clean_peakon_key(k): v for k, v in record.items()}
+                            seg_records.append(clean_record)
 
                     # Follow cursor pagination if present
                     links = resp_data.get("links", {})
@@ -1206,14 +1210,15 @@ class PeakonConnector:
                     rels = item.get("relationships")
                     if isinstance(rels, dict):
                         for rel_name, rel in rels.items():
+                            clean_rel = _clean_peakon_key(rel_name)
                             data = (rel or {}).get("data") if isinstance(rel, dict) else None
                             if isinstance(data, dict):
-                                record[f"rel_{rel_name}_id"] = data.get("id")
-                                record[f"rel_{rel_name}_type"] = data.get("type")
+                                record[f"rel_{clean_rel}_id"] = data.get("id")
+                                record[f"rel_{clean_rel}_type"] = data.get("type")
                             elif isinstance(data, list) and data:
-                                record[f"rel_{rel_name}_ids"] = json.dumps([d.get("id") for d in data if isinstance(d, dict)])
+                                record[f"rel_{clean_rel}_ids"] = json.dumps([d.get("id") for d in data if isinstance(d, dict)])
                                 if isinstance(data[0], dict):
-                                    record[f"rel_{rel_name}_type"] = data[0].get("type")
+                                    record[f"rel_{clean_rel}_type"] = data[0].get("type")
 
                     # Lists and nested sections as JSON text, so flattening cannot split rows or clash on types
                     for k, v in list(record.items()):
@@ -1226,7 +1231,8 @@ class PeakonConnector:
                     if isinstance(meta_obj, dict):
                         for mk, mv in meta_obj.items():
                             if not isinstance(mv, (dict, list)):
-                                record[f"meta_{mk}"] = mv
+                                clean_mk = _clean_peakon_key(mk)
+                                record[f"meta_{clean_mk}"] = mv
 
                     # If ingesting the segments table, record IDs for subsequent segment-dependent tables
                     if table_name.lower().endswith("segments") and item.get("id"):
@@ -1259,7 +1265,8 @@ class PeakonConnector:
                             total_filtered_out += 1
                             continue
 
-                    page_valid_records.append(record)
+                    clean_record = {_clean_peakon_key(k): v for k, v in record.items()}
+                    page_valid_records.append(clean_record)
 
             total_extracted += len(page_valid_records)
             logger.info(
