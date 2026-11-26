@@ -13,7 +13,7 @@
 -- ==============================================================================
 
 select
-    cast(coalesce(position_id, id) as string)                            as position_id,
+    cast(coalesce(wid, position_id, id) as string)                       as position_id,
     cast(requisition_id as string)                                       as requisition_id,
     cast(position_title as string)                                       as position_title,
     cast(job_profile as string)                                          as job_profile,
