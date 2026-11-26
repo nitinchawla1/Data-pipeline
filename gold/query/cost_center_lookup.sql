@@ -13,7 +13,7 @@
 -- ==============================================================================
 
 select
-    cast(coalesce(cost_center_id, cost_center, id) as string)            as cost_center_id,
+    cast(coalesce(cost_center_number, cost_center_id, cost_center, id) as string) as cost_center_id,
     cast(cost_center_name as string)                                     as cost_center_name,
     cast(cost_center_code as string)                                     as cost_center_code,
     cast(manager_id as string)                                           as manager_id,
