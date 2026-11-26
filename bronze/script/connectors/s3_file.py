@@ -39,6 +39,18 @@ _SUPPORTED_FORMATS = ('csv', 'tsv', 'json', 'ndjson', 'parquet', 'text')
 _VALID_FETCH_MODES = ('all', 'latest')
 
 
+def _clean_s3_file_key(key: Any) -> str:
+    """
+    Normalizes file column/attribute names to match AWS Glue Data Catalog (lowercase, snake_case).
+    Converts spaces and hyphens to underscores and strips whitespace.
+    Leaves single-word and camelCase identifiers untouched if they contain no spaces or hyphens.
+    """
+    k_str = str(key).strip().lstrip('\ufeff')
+    if " " in k_str or "-" in k_str:
+        return k_str.lower().replace(" ", "_").replace("-", "_")
+    return k_str
+
+
 class S3FileConnector:
     """
     Ingestion connector for reading files from S3 source buckets.
@@ -342,7 +354,10 @@ class S3FileConnector:
                     return []
                 f = io.StringIO(text)
                 if has_header:
-                    return [dict(row) for row in csv.DictReader(f, **reader_kwargs)]
+                    return [
+                        {_clean_s3_file_key(k): v for k, v in row.items() if k is not None}
+                        for row in csv.DictReader(f, **reader_kwargs)
+                    ]
                 return [
                     {f'col_{i}': v for i, v in enumerate(row)}
                     for row in csv.reader(f, **reader_kwargs)
@@ -352,7 +367,10 @@ class S3FileConnector:
             if not lines:
                 return []
             if has_header:
-                return [dict(row) for row in csv.DictReader(lines, **reader_kwargs)]
+                return [
+                    {_clean_s3_file_key(k): v for k, v in row.items() if k is not None}
+                    for row in csv.DictReader(lines, **reader_kwargs)
+                ]
             return [
                 {f'col_{i}': v for i, v in enumerate(row)}
                 for row in csv.reader(lines, **reader_kwargs)
@@ -367,7 +385,7 @@ class S3FileConnector:
                 try:
                     obj = json.loads(line)
                     if isinstance(obj, dict):
-                        records.append(obj)
+                        records.append({_clean_s3_file_key(k): v for k, v in obj.items() if k is not None})
                 except json.JSONDecodeError:
                     break
             if records:
@@ -375,12 +393,12 @@ class S3FileConnector:
             # Fallback: full JSON array
             parsed = json.loads(text)
             if isinstance(parsed, list):
-                return parsed
+                return [{_clean_s3_file_key(k): v for k, v in r.items() if k is not None} if isinstance(r, dict) else r for r in parsed]
             if isinstance(parsed, dict):
                 for key in ('data', 'records', 'value', 'entities'):
                     if key in parsed and isinstance(parsed[key], list):
-                        return parsed[key]
-                return [parsed]
+                        return [{_clean_s3_file_key(k): v for k, v in r.items() if k is not None} if isinstance(r, dict) else r for r in parsed[key]]
+                return [{_clean_s3_file_key(k): v for k, v in parsed.items() if k is not None}]
             return []
 
         if file_format == 'text':
@@ -391,6 +409,8 @@ class S3FileConnector:
 
         if file_format == 'parquet':
             import pandas as pd
-            return pd.read_parquet(io.BytesIO(body_bytes)).to_dict(orient='records')
+            df = pd.read_parquet(io.BytesIO(body_bytes))
+            df.columns = [_clean_s3_file_key(c) for c in df.columns]
+            return df.to_dict(orient='records')
 
         raise ValueError(f"Unsupported file_format: '{file_format}'.")
